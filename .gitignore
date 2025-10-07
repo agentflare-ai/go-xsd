@@ -1,0 +1,89 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+coverage.xml
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# GoReleaser artifacts
+.goreleaser.yml.backup
+goreleaser_output/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS-specific files
+Thumbs.db
+Desktop.ini
+.directory
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+*.backup
+*.bak
+
+# Profiling and benchmarking
+*.prof
+*.pprof
+cpu.prof
+mem.prof
+*.bench
+
+# Debug files
+debug
+__debug_bin
+
+# Air (live reload for Go apps)
+tmp/
+.air.toml
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Archive files from release
+*.tar.gz
+*.zip
+
+# Documentation build artifacts
+docs/_build/
+site/
