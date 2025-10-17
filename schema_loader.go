@@ -54,11 +54,12 @@ func (sl *SchemaLoader) LoadSchemaWithImports(location string) (*Schema, error) 
 
 	// Initialize combined schema
 	sl.combined = &Schema{
-		ElementDecls:    make(map[QName]*ElementDecl),
-		TypeDefs:        make(map[QName]Type),
-		AttributeGroups: make(map[QName]*AttributeGroup),
-		Groups:          make(map[QName]*ModelGroup),
-		ImportedSchemas: make(map[string]*Schema),
+		ElementDecls:       make(map[QName]*ElementDecl),
+		TypeDefs:           make(map[QName]Type),
+		AttributeGroups:    make(map[QName]*AttributeGroup),
+		Groups:             make(map[QName]*ModelGroup),
+		ImportedSchemas:    make(map[string]*Schema),
+		SubstitutionGroups: make(map[QName][]QName),
 	}
 
 	// Load the main schema
@@ -321,6 +322,26 @@ func (sl *SchemaLoader) mergeComponents(source, target *Schema) {
 		}
 	}
 
+	// Merge substitution groups
+	for headQName, members := range source.SubstitutionGroups {
+		// Append members to existing substitution group (avoiding duplicates)
+		existing := target.SubstitutionGroups[headQName]
+		for _, member := range members {
+			// Check if member already exists
+			found := false
+			for _, existingMember := range existing {
+				if existingMember == member {
+					found = true
+					break
+				}
+			}
+			if !found {
+				existing = append(existing, member)
+			}
+		}
+		target.SubstitutionGroups[headQName] = existing
+	}
+
 	// Append imports (for transitive imports)
 	target.Imports = append(target.Imports, source.Imports...)
 }
@@ -362,4 +383,247 @@ func LoadSchemaWithImports(location string) (*Schema, error) {
 	baseDir := filepath.Dir(location)
 	loader := NewSchemaLoader(baseDir)
 	return loader.LoadSchemaWithImports(location)
+}
+
+// ExtractNamespaces extracts all xmlns namespace declarations from an XML document
+func ExtractNamespaces(doc xmldom.Document) map[string]string {
+	namespaces := make(map[string]string)
+
+	root := doc.DocumentElement()
+	if root == nil {
+		return namespaces
+	}
+
+	// Get all attributes on the root element
+	attrs := root.Attributes()
+	for i := uint(0); i < attrs.Length(); i++ {
+		attr := attrs.Item(i)
+		if attr == nil {
+			continue
+		}
+
+		attrNS := string(attr.NamespaceURI())
+		attrLocal := string(attr.LocalName())
+		attrName := string(attr.NodeName())
+		attrValue := string(attr.NodeValue())
+
+		// Check for xmlns declarations
+		// xmlns="..." (default namespace)
+		if attrName == "xmlns" {
+			namespaces[""] = attrValue
+			continue
+		}
+
+		// xmlns:prefix="..." (prefixed namespace)
+		// The xmldom library may represent this with namespace="xmlns" or "http://www.w3.org/2000/xmlns/"
+		if attrNS == "http://www.w3.org/2000/xmlns/" || attrNS == "xmlns" {
+			prefix := attrLocal
+			namespaces[prefix] = attrValue
+			continue
+		}
+
+		// Also check for xmlns: prefix in the attribute name as a fallback
+		if strings.HasPrefix(attrName, "xmlns:") {
+			prefix := strings.TrimPrefix(attrName, "xmlns:")
+			namespaces[prefix] = attrValue
+		}
+	}
+
+	return namespaces
+}
+
+// Schema path patterns for namespace resolution
+// These patterns define how to construct potential schema URLs from a namespace URI
+// Variables: {ns} = namespace URI, {prefix} = element prefix, {base} = base domain
+var schemaPathPatterns = []string{
+	"{ns}.xsd",          // e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev/agentml.xsd
+	"{ns}",              // Try the namespace URI directly
+	"{ns}/{prefix}.xsd", // e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev/agentml/agentml.xsd
+	"{base}/schema.xsd", // e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev/schema.xsd
+	"{ns}/schema.xsd",   // e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev/agentml/schema.xsd
+	"{ns}/index.xsd",    // e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev/agentml/index.xsd
+}
+
+// TryLoadSchemaWithFallbacks attempts to load a schema from a namespace URI with fallback strategies
+func (sl *SchemaLoader) TryLoadSchemaWithFallbacks(namespaceURI, prefix string) (*Schema, error) {
+	if namespaceURI == "" {
+		return nil, fmt.Errorf("empty namespace URI")
+	}
+
+	// Skip built-in XML/XSD namespaces
+	if namespaceURI == XSDNamespace ||
+		namespaceURI == "http://www.w3.org/2001/XMLSchema-instance" ||
+		namespaceURI == "http://www.w3.org/XML/1998/namespace" ||
+		namespaceURI == "http://www.w3.org/2000/xmlns/" {
+		return nil, fmt.Errorf("skipping built-in namespace: %s", namespaceURI)
+	}
+
+	// Determine namespace characteristics
+	isURL := strings.HasPrefix(namespaceURI, "http://") || strings.HasPrefix(namespaceURI, "https://")
+	looksLikeDomain := !isURL && strings.Contains(namespaceURI, ".") &&
+		(strings.Contains(namespaceURI, "/") || !strings.Contains(namespaceURI, ":"))
+
+	// Extract base domain from namespace (e.g., xsd.agentml.dev/agentml -> xsd.agentml.dev)
+	baseDomain := namespaceURI
+	if strings.Contains(namespaceURI, "/") {
+		parts := strings.Split(namespaceURI, "/")
+		baseDomain = parts[0]
+	}
+
+	// Build schema path attempts from patterns
+	var attempts []string
+	schemes := []string{"https://", "http://"}
+
+	for _, pattern := range schemaPathPatterns {
+		// Replace pattern variables
+		path := strings.ReplaceAll(pattern, "{ns}", namespaceURI)
+		path = strings.ReplaceAll(path, "{prefix}", prefix)
+		path = strings.ReplaceAll(path, "{base}", baseDomain)
+
+		// Skip if prefix is required but not provided
+		if strings.Contains(pattern, "{prefix}") && prefix == "" {
+			continue
+		}
+
+		// Generate URLs based on namespace type
+		if isURL {
+			// Already a full URL, use as-is
+			attempts = append(attempts, path)
+		} else if looksLikeDomain {
+			// Domain-like namespace - try both https and http
+			for _, scheme := range schemes {
+				attempts = append(attempts, scheme+path)
+			}
+		} else {
+			// Local path
+			attempts = append(attempts, path)
+		}
+	}
+
+	// Try loading from each attempt
+	var lastErr error
+	for _, location := range attempts {
+		fmt.Fprintf(os.Stderr, "DEBUG: Trying to load schema from: %s\n", location)
+		schema, err := sl.loadSchemaRecursive(location, namespaceURI)
+		if err == nil && schema != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: Successfully loaded schema from: %s\n", location)
+			return schema, nil
+		}
+		lastErr = err
+	}
+
+	// Fallback: Try common local paths relative to base directory
+	if sl.BaseDir != "" {
+		localPaths := []string{
+			filepath.Join(sl.BaseDir, "agentml.xsd"),
+			filepath.Join(sl.BaseDir, "agentml", "agentml.xsd"),
+			filepath.Join(sl.BaseDir, "../agentml/agentml.xsd"),
+		}
+
+		for _, localPath := range localPaths {
+			absPath, err := filepath.Abs(localPath)
+			if err != nil {
+				continue
+			}
+
+			// Check if file exists
+			if _, err := os.Stat(absPath); err == nil {
+				schema, err := sl.loadSchemaRecursive(absPath, namespaceURI)
+				if err == nil && schema != nil {
+					return schema, nil
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("failed to load schema for namespace %s: %w", namespaceURI, lastErr)
+}
+
+// LoadSchemasFromDocument extracts xmlns declarations from a document and loads schemas for them
+func (sl *SchemaLoader) LoadSchemasFromDocument(doc xmldom.Document) (*Schema, error) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+
+	// Extract namespaces
+	namespaces := ExtractNamespaces(doc)
+
+	// Get root element tag name for default namespace
+	var rootTagName string
+	if root := doc.DocumentElement(); root != nil {
+		rootTagName = string(root.LocalName())
+	}
+
+	// Initialize combined schema
+	sl.combined = &Schema{
+		ElementDecls:       make(map[QName]*ElementDecl),
+		TypeDefs:           make(map[QName]Type),
+		AttributeGroups:    make(map[QName]*AttributeGroup),
+		Groups:             make(map[QName]*ModelGroup),
+		ImportedSchemas:    make(map[string]*Schema),
+		SubstitutionGroups: make(map[QName][]QName),
+	}
+
+	var mainSchema *Schema
+	successCount := 0
+
+	// Try to load schema for each namespace
+	for prefix, nsURI := range namespaces {
+		// If prefix is empty (default namespace), use the root element's tag name
+		prefixToUse := prefix
+		if prefixToUse == "" && rootTagName != "" {
+			prefixToUse = rootTagName
+		}
+
+		schema, err := sl.TryLoadSchemaWithFallbacks(nsURI, prefixToUse)
+		if err != nil {
+			// Log but continue - not all namespaces may have loadable schemas
+			fmt.Printf("Info: Could not load schema for namespace %s (prefix: %s): %v\n", nsURI, prefixToUse, err)
+			continue
+		}
+
+		// Successfully loaded a schema
+		successCount++
+
+		// Use the first successfully loaded schema as main
+		if mainSchema == nil {
+			mainSchema = schema
+			sl.combined.TargetNamespace = schema.TargetNamespace
+		}
+
+		// Store in loaded map
+		sl.loaded[nsURI] = schema
+
+		// Merge into combined schema
+		if err := sl.mergeSchema(schema, nsURI); err != nil {
+			return nil, fmt.Errorf("failed to merge schema for %s: %w", nsURI, err)
+		}
+	}
+
+	if successCount == 0 {
+		return nil, fmt.Errorf("could not load any schemas from document namespaces")
+	}
+
+	// Resolve all references in the combined schema
+	sl.combined.resolveReferences()
+
+	// Debug: Print what we loaded
+	fmt.Fprintf(os.Stderr, "DEBUG: Combined schema has:\n")
+	fmt.Fprintf(os.Stderr, "  - Target namespace: %s\n", sl.combined.TargetNamespace)
+	fmt.Fprintf(os.Stderr, "  - %d element declarations\n", len(sl.combined.ElementDecls))
+	fmt.Fprintf(os.Stderr, "  - Element names: ")
+	count := 0
+	for qname := range sl.combined.ElementDecls {
+		if count > 0 {
+			fmt.Fprintf(os.Stderr, ", ")
+		}
+		fmt.Fprintf(os.Stderr, "%s", qname.Local)
+		count++
+		if count >= 10 {
+			fmt.Fprintf(os.Stderr, ", ...")
+			break
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n")
+
+	return sl.combined, nil
 }

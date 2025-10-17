@@ -13,7 +13,7 @@ import (
 type SchemaCache struct {
 	mu       sync.RWMutex
 	schemas  map[string]*schemaEntry
-	basePath string
+	BasePath string // Base path for resolving relative schema locations
 }
 
 // schemaEntry holds a schema and its loader
@@ -31,7 +31,7 @@ var GlobalCache = NewSchemaCache("")
 func NewSchemaCache(basePath string) *SchemaCache {
 	return &SchemaCache{
 		schemas:  make(map[string]*schemaEntry),
-		basePath: basePath,
+		BasePath: basePath,
 	}
 }
 
@@ -39,7 +39,7 @@ func NewSchemaCache(basePath string) *SchemaCache {
 func (sc *SchemaCache) SetBasePath(path string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	sc.basePath = path
+	sc.BasePath = path
 }
 
 // Get retrieves a schema from cache or loads it if not present
@@ -125,8 +125,8 @@ func (sc *SchemaCache) resolvePath(location string) string {
 	if filepath.IsAbs(location) {
 		return location
 	}
-	if sc.basePath != "" {
-		return filepath.Join(sc.basePath, location)
+	if sc.BasePath != "" {
+		return filepath.Join(sc.BasePath, location)
 	}
 	// Try to resolve relative to current directory
 	abs, err := filepath.Abs(location)

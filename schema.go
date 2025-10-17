@@ -1412,11 +1412,20 @@ func (s *Schema) parseQName(name string) QName {
 							Local:     local,
 						}
 					}
+					// xmldom may present namespace declarations without xmlns: prefix
+					// Check if this attribute name matches our prefix and has a namespace URI as value
+					if attrName == prefix {
+						nsValue := string(attr.NodeValue())
+						// Heuristic: namespace values typically contain "://" or start with specific patterns
+						if strings.Contains(nsValue, "://") || strings.Contains(nsValue, "/") || strings.Contains(nsValue, ".") {
+							return QName{
+								Namespace: nsValue,
+								Local:     local,
+							}
+						}
+					}
 				}
 
-				// Fallback: assume prefix refers to target namespace
-				// This is common in schemas where xmlns:t="targetNamespace"
-				// TODO: Improve namespace prefix resolution by actually reading xmlns attributes
 				return QName{
 					Namespace: s.TargetNamespace,
 					Local:     local,
@@ -2183,6 +2192,31 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 	if wildcard, isWildcard := particle.(*AnyElement); isWildcard {
 		matched, consumed, _ = mg.matchWildcard(wildcard, children, schema)
 		return matched, consumed
+	}
+
+	// Handle nested ModelGroups specially
+	if nestedGroup, isModelGroup := particle.(*ModelGroup); isModelGroup {
+		switch nestedGroup.Kind {
+		case ChoiceGroup:
+			// For a choice group, match consecutive children against any particle in the choice
+			consumed, _ = mg.matchChoiceGroup(nestedGroup, children, schema)
+			matched = consumed // Each consumed child is one match
+			return matched, consumed
+		case SequenceGroup:
+			// For a sequence group, recursively count consumed
+			consumed = mg.countConsumedByGroup(nestedGroup, children, schema)
+			if consumed > 0 {
+				matched = 1 // The group matched once (consumed multiple children)
+			}
+			return matched, consumed
+		case AllGroup:
+			// For an all group, count consumed
+			consumed = mg.countConsumedByGroup(nestedGroup, children, schema)
+			if consumed > 0 {
+				matched = 1
+			}
+			return matched, consumed
+		}
 	}
 
 	// Handle inline ElementDecl specially - it can match and validate
