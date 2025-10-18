@@ -411,8 +411,20 @@ func (sl *SchemaLoader) mergeComponents(source, target *Schema) {
 		target.SubstitutionGroups[headQName] = existing
 	}
 
-	// Append imports (for transitive imports)
-	target.Imports = append(target.Imports, source.Imports...)
+	// Append imports (for transitive imports), avoiding duplicates
+	for _, imp := range source.Imports {
+		// Check if this import already exists
+		found := false
+		for _, existing := range target.Imports {
+			if existing.Namespace == imp.Namespace && existing.SchemaLocation == imp.SchemaLocation {
+				found = true
+				break
+			}
+		}
+		if !found {
+			target.Imports = append(target.Imports, imp)
+		}
+	}
 }
 
 // mergeWithNamespace merges schema components preserving namespaces (for xs:import)
