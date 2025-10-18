@@ -77,7 +77,7 @@ func TestSchemaImport(t *testing.T) {
 	}
 
 	// Load the schema with imports
-	loader := NewSchemaLoader(tempDir)
+	loader := NewSchemaLoaderSimple(tempDir)
 	schema, err := loader.LoadSchemaWithImports(mainFile)
 	if err != nil {
 		t.Fatalf("Failed to load schema with imports: %v", err)
@@ -238,7 +238,7 @@ func TestSchemaInclude(t *testing.T) {
 	}
 
 	// Load the schema with includes
-	loader := NewSchemaLoader(tempDir)
+	loader := NewSchemaLoaderSimple(tempDir)
 	schema, err := loader.LoadSchemaWithImports(mainFile)
 	if err != nil {
 		t.Fatalf("Failed to load schema with includes: %v", err)
@@ -372,7 +372,7 @@ func TestCircularImports(t *testing.T) {
 	}
 
 	// Load schema A (which imports B, which imports A)
-	loader := NewSchemaLoader(tempDir)
+	loader := NewSchemaLoaderSimple(tempDir)
 	schema, err := loader.LoadSchemaWithImports(fileA)
 
 	// Should handle circular imports gracefully
