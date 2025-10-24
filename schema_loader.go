@@ -3,11 +3,13 @@ package xsd
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -134,10 +136,15 @@ func (sl *SchemaLoader) LoadSchemaWithImports(location string) (*Schema, error) 
 	sl.combined.TargetNamespace = mainSchema.TargetNamespace
 	sl.combined.doc = mainSchema.doc
 
+	// Merge the main schema (treat as include since same namespace)
+	if err := sl.mergeSchema(mainSchema, location); err != nil {
+		return nil, fmt.Errorf("failed to merge main schema: %w", err)
+	}
+
 	// Merge all loaded schemas into the combined schema
-	for location, schema := range sl.loaded {
-		if err := sl.mergeSchema(schema, location); err != nil {
-			return nil, fmt.Errorf("failed to merge schema %s: %w", location, err)
+	for loc, schema := range sl.loaded {
+		if err := sl.mergeSchema(schema, loc); err != nil {
+			return nil, fmt.Errorf("failed to merge schema %s: %w", loc, err)
 		}
 	}
 
@@ -197,7 +204,7 @@ func (sl *SchemaLoader) loadSchemaRecursive(location string) (*Schema, error) {
 			if err != nil {
 				// Import failures are often non-fatal
 				// Log the error but continue
-				fmt.Printf("Warning: failed to import %s: %v\n", imp.SchemaLocation, err)
+				slog.Error("failed to import schema", "location", imp.SchemaLocation, "error", err)
 			}
 		}
 	}
@@ -397,14 +404,7 @@ func (sl *SchemaLoader) mergeComponents(source, target *Schema) {
 		existing := target.SubstitutionGroups[headQName]
 		for _, member := range members {
 			// Check if member already exists
-			found := false
-			for _, existingMember := range existing {
-				if existingMember == member {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !slices.Contains(existing, member) {
 				existing = append(existing, member)
 			}
 		}
@@ -525,8 +525,7 @@ func ExtractNamespaces(doc xmldom.Document) map[string]NamespaceAttr {
 		}
 
 		// Also check for xmlns: prefix in the attribute name as a fallback
-		if strings.HasPrefix(attrName, "xmlns:") {
-			prefix := strings.TrimPrefix(attrName, "xmlns:")
+		if prefix, found := strings.CutPrefix(attrName, "xmlns:"); found {
 			namespaces[prefix] = NamespaceAttr{
 				Prefix: prefix,
 				URI:    attrValue,
@@ -571,7 +570,7 @@ func (sl *SchemaLoader) LoadSchemasFromNamespaces(namespaces map[string]Namespac
 		schema, err := sl.loadSchemaForNamespaceUnlocked(nsAttr.Attr)
 		if err != nil {
 			// Log but continue - not all namespaces may have loadable schemas
-			fmt.Printf("Info: Could not load schema for namespace %s: %v\n", nsAttr.URI, err)
+			slog.Info("could not load schema for namespace", "namespace", nsAttr.URI, "error", err)
 			continue
 		}
 

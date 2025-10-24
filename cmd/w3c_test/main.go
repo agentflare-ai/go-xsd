@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/agentflare-ai/go-xsd"
 )
@@ -18,13 +19,28 @@ func main() {
 		testFile     = flag.String("file", "", "Run a specific test metadata file")
 		limit        = flag.Int("limit", 0, "Limit number of tests to run (0 = no limit)")
 		analyze      = flag.Bool("analyze", false, "Generate failure analysis report")
+		autoDownload = flag.Bool("auto-download", false, "Automatically download W3C test suite if not found")
+		forceDownload = flag.Bool("force-download", false, "Force re-download even if cached (implies --auto-download)")
 	)
 
 	flag.Parse()
 
-	// Check if test suite directory exists
-	if _, err := os.Stat(*testSuiteDir); os.IsNotExist(err) {
-		log.Fatalf("Test suite directory not found: %s", *testSuiteDir)
+	// Force download implies auto download
+	if *forceDownload {
+		*autoDownload = true
+		// Remove cache marker to force fresh download
+		markerPath := filepath.Join(*testSuiteDir, downloadMarker)
+		os.Remove(markerPath)
+	}
+
+	// Ensure test suite exists (download if needed)
+	downloaded, err := ensureTestSuite(*testSuiteDir, *autoDownload)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	if downloaded {
+		fmt.Printf("Note: Downloaded test suite is cached for %v\n\n", cacheDuration)
 	}
 
 	// Create test runner

@@ -202,10 +202,13 @@ func (v *Validator) validateElement(elem xmldom.Element, parentType Type) {
 	fixedDefaultViolations := ValidateElementFixedDefault(elem, decl)
 	v.violations = append(v.violations, fixedDefaultViolations...)
 
-	// Validate against type
+	// Validate against type (but skip content validation for ComplexType,
+	// as that will be done in validateChildren to avoid duplication)
 	if decl.Type != nil {
-		violations := decl.Type.Validate(elem, v.schema)
-		v.violations = append(v.violations, violations...)
+		if _, isComplexType := decl.Type.(*ComplexType); !isComplexType {
+			violations := decl.Type.Validate(elem, v.schema)
+			v.violations = append(v.violations, violations...)
+		}
 
 		// Validate element value against built-in type and facets
 		content := getElementTextContent(elem)

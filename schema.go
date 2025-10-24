@@ -269,6 +269,7 @@ func Parse(doc xmldom.Document) (*Schema, error) {
 		TypeDefs:           make(map[QName]Type),
 		AttributeGroups:    make(map[QName]*AttributeGroup),
 		Groups:             make(map[QName]*ModelGroup),
+		ImportedSchemas:    make(map[string]*Schema),
 		SubstitutionGroups: make(map[QName][]QName),
 		doc:                doc,
 	}
@@ -384,6 +385,13 @@ func (s *Schema) resolveReferences() {
 			if cc, ok := ct.Content.(*ComplexContent); ok && cc.Extension != nil {
 				s.resolveExtension(ct, cc.Extension)
 			}
+		}
+	}
+
+	// Also resolve types in anonymous complex types used in element declarations
+	for _, elemDecl := range s.ElementDecls {
+		if ct, ok := elemDecl.Type.(*ComplexType); ok {
+			s.resolveTypesInComplexType(ct)
 		}
 	}
 
@@ -1489,6 +1497,47 @@ func (s *Schema) ResolveAttributeGroups(ct *ComplexType) []*AttributeDecl {
 	return attrs
 }
 
+// resolveTypesInComplexType resolves all types in a complex type
+func (s *Schema) resolveTypesInComplexType(ct *ComplexType) {
+	// Check if content is a GroupRef that needs resolution
+	if gr, ok := ct.Content.(*GroupRef); ok {
+		// Resolve the group reference
+		if group, exists := s.Groups[gr.Ref]; exists {
+			// Create a copy of the group with updated occurrences
+			resolvedGroup := &ModelGroup{
+				Kind:      group.Kind,
+				Particles: s.resolveParticles(group.Particles),
+				MinOcc:    gr.MinOcc,
+				MaxOcc:    gr.MaxOcc,
+			}
+			if gr.MinOcc == 0 && gr.MaxOcc == 0 {
+				// Use original if not specified
+				resolvedGroup.MinOcc = group.MinOcc
+				resolvedGroup.MaxOcc = group.MaxOcc
+			}
+			ct.Content = resolvedGroup
+		}
+	}
+
+	// Also resolve particles in existing ModelGroup content
+	if mg, ok := ct.Content.(*ModelGroup); ok {
+		mg.Particles = s.resolveParticles(mg.Particles)
+
+		// Resolve types for inline ElementDecl particles
+		s.resolveInlineElementTypes(mg.Particles)
+	}
+
+	// Resolve SimpleContent extensions
+	if sc, ok := ct.Content.(*SimpleContent); ok && sc.Extension != nil {
+		s.resolveExtension(ct, sc.Extension)
+	}
+
+	// Resolve ComplexContent extensions
+	if cc, ok := ct.Content.(*ComplexContent); ok && cc.Extension != nil {
+		s.resolveExtension(ct, cc.Extension)
+	}
+}
+
 // resolveInlineElementTypes resolves placeholder types for inline ElementDecl particles
 func (s *Schema) resolveInlineElementTypes(particles []Particle) {
 	for _, p := range particles {
@@ -1884,8 +1933,8 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 				// Particle consumed some children
 
 				// If this is an inline ElementDecl, validate the matched elements
-				if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl && elemDecl.Type != nil {
-					// Validate each matched element against its type
+				if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl {
+					// Validate each matched element
 					for i := 0; i < consumed; i++ {
 						childElem := children[childIndex+i]
 
@@ -1895,16 +1944,23 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 							Local:     string(childElem.LocalName()),
 						}
 
-						// If element is substituted, use the actual element's type
-						var typeToValidate Type = elemDecl.Type
+						// Get the actual element declaration (for substitution groups)
+						var actualDecl *ElementDecl = elemDecl
 						if actualQName != elemDecl.Name {
-							if actualDecl, exists := schema.ElementDecls[actualQName]; exists && actualDecl.Type != nil {
-								typeToValidate = actualDecl.Type
+							if foundDecl, exists := schema.ElementDecls[actualQName]; exists {
+								actualDecl = foundDecl
 							}
 						}
 
-						typeViolations := typeToValidate.Validate(childElem, schema)
-						violations = append(violations, typeViolations...)
+						// Validate fixed and default values
+						fixedDefaultViolations := ValidateElementFixedDefault(childElem, actualDecl)
+						violations = append(violations, fixedDefaultViolations...)
+
+						// Validate against its type
+						if actualDecl.Type != nil {
+							typeViolations := actualDecl.Type.Validate(childElem, schema)
+							violations = append(violations, typeViolations...)
+						}
 					}
 				} else if elemRef, isElemRef := particle.(*ElementRef); isElemRef {
 					// For ElementRef, validate each matched element
@@ -1924,6 +1980,20 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 							// Try with target namespace
 							actualQName.Namespace = schema.TargetNamespace
 							actualDecl, exists = schema.ElementDecls[actualQName]
+						}
+
+						// Get the declaration to use for validation (actual or referenced)
+						var declToValidate *ElementDecl
+						if exists {
+							declToValidate = actualDecl
+						} else if refDecl, refExists := schema.ElementDecls[elemRef.Ref]; refExists {
+							declToValidate = refDecl
+						}
+
+						// Validate fixed and default values
+						if declToValidate != nil {
+							fixedDefaultViolations := ValidateElementFixedDefault(childElem, declToValidate)
+							violations = append(violations, fixedDefaultViolations...)
 						}
 
 						// Use the actual element's type if found, otherwise fall back to referenced type

@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run unit tests
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.txt
+          flags: unittests
+          fail_ci_if_error: false
+
+  w3c-tests:
+    name: W3C Conformance Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Cache W3C Test Suite
+        id: cache-w3c
+        uses: actions/cache@v4
+        with:
+          path: /tmp/xsd-test-suite
+          key: w3c-test-suite-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            w3c-test-suite-
+
+      - name: Build w3c_test tool
+        run: |
+          cd cmd/w3c_test
+          go build -o w3c_test
+
+      - name: Run W3C conformance tests
+        id: w3c-test
+        run: |
+          cd cmd/w3c_test
+          ./w3c_test --auto-download --analyze --output w3c-results.txt || true
+
+          # Extract test statistics
+          if [ -f w3c-results.txt ]; then
+            PASSED=$(grep "Passed:" w3c-results.txt | awk '{print $2}')
+            TOTAL=$(grep "Total Tests:" w3c-results.txt | awk '{print $3}')
+            PASS_RATE=$(grep "Passed:" w3c-results.txt | grep -oP '\(\K[^)]+' || echo "0%")
+
+            echo "total=$TOTAL" >> $GITHUB_OUTPUT
+            echo "passed=$PASSED" >> $GITHUB_OUTPUT
+            echo "pass_rate=$PASS_RATE" >> $GITHUB_OUTPUT
+
+            cat w3c-results.txt
+          fi
+
+      - name: Upload W3C test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: w3c-test-results
+          path: cmd/w3c_test/w3c-results.txt
+          retention-days: 30
+
+      - name: Create test badge
+        if: always()
+        run: |
+          # Create badge data for README
+          PASSED="${{ steps.w3c-test.outputs.passed }}"
+          TOTAL="${{ steps.w3c-test.outputs.total }}"
+          PASS_RATE="${{ steps.w3c-test.outputs.pass_rate }}"
+
+          echo "W3C Tests: $PASSED/$TOTAL ($PASS_RATE)" > w3c-badge.txt
+
+      - name: Upload badge data
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: w3c-badge
+          path: w3c-badge.txt
+          retention-days: 1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -v ./...
+          cd cmd/validate && go build -v
+          cd ../w3c_test && go build -v

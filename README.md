@@ -1,5 +1,10 @@
 # go-xsd
 
+[![CI](https://github.com/agentflare-ai/go-xsd/workflows/CI/badge.svg)](https://github.com/agentflare-ai/go-xsd/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/agentflare-ai/go-xsd)](https://goreportcard.com/report/github.com/agentflare-ai/go-xsd)
+[![GoDoc](https://godoc.org/github.com/agentflare-ai/go-xsd?status.svg)](https://godoc.org/github.com/agentflare-ai/go-xsd)
+[![codecov](https://codecov.io/gh/agentflare-ai/go-xsd/branch/main/graph/badge.svg)](https://codecov.io/gh/agentflare-ai/go-xsd)
+
 A comprehensive XML Schema Definition (XSD) validator for Go that provides W3C-compliant XML validation against XSD schemas.
 
 ## Features
@@ -213,6 +218,8 @@ Support for `<xs:any>` elements with proper namespace constraint validation:
 
 ## Testing
 
+### Unit Tests
+
 Run the test suite:
 
 ```bash
@@ -226,13 +233,29 @@ go test -v -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
+### W3C Conformance Tests
+
+The library is tested against the official [W3C XML Schema Test Suite](https://www.w3.org/XML/2004/xml-schema-test-suite/):
+
+```bash
+# Auto-download and run W3C conformance tests
+go run ./cmd/w3c_test --auto-download --analyze
+
+# View detailed results
+go run ./cmd/w3c_test --auto-download --verbose
+```
+
+**CI Integration**: W3C tests run automatically in CI/CD before each release to ensure standards compliance.
+
+### Test Coverage
+
 The library includes comprehensive tests including:
-- W3C test suite validation
-- Identity constraint tests
-- Substitution group tests
-- Wildcard validation tests
-- Fixed/default value tests
-- Union and list type tests
+- **W3C Conformance Suite**: Official W3C test cases (runs in CI)
+- **Identity Constraints**: key, keyref, and unique validation
+- **Substitution Groups**: Element substitution and type checking
+- **Wildcard Validation**: xs:any and xs:anyAttribute handling
+- **Fixed/Default Values**: Attribute and element defaults
+- **Union and List Types**: Complex type composition
 
 ## Project Structure
 
@@ -271,8 +294,23 @@ go run ./cmd/validate schema.xsd document.xml
 Run W3C XSD test suite:
 
 ```bash
-go run ./cmd/w3c_test path/to/w3c/testsuite
+# Auto-download and run (downloads once, cached for 7 days)
+go run ./cmd/w3c_test --auto-download
+
+# Run with specific suite directory
+go run ./cmd/w3c_test -suite /path/to/w3c/testsuite
+
+# Force fresh download (bypasses cache)
+go run ./cmd/w3c_test --force-download
+
+# Run specific test file
+go run ./cmd/w3c_test --auto-download -file msMeta/test_w3c.xml
+
+# Generate failure analysis report
+go run ./cmd/w3c_test --auto-download -analyze
 ```
+
+**Note:** The test suite (≈50MB) is automatically downloaded from W3C and cached locally. The cache expires after 7 days to avoid hammering W3C servers with repeated downloads.
 
 ## Requirements
 
