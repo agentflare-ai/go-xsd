@@ -2081,11 +2081,35 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 					particleIndex++
 				} else {
 					// Required particle didn't match
-					violations = append(violations, Violation{
-						Element: child,
-						Code:    "cvc-complex-type.2.4.d",
-						Message: fmt.Sprintf("Unexpected element '%s'", child.LocalName()),
-					})
+					// Check if this element would have matched a preceding wildcard but violated namespace constraint
+					wildcardViolation := false
+					for i := 0; i < particleIndex; i++ {
+						if wildcard, isWildcard := mg.Particles[i].(*AnyElement); isWildcard {
+							// Check if element doesn't match wildcard's namespace constraint
+							if !MatchesWildcard(child, wildcard.Namespace, schema.TargetNamespace) {
+								// Element violates wildcard namespace constraint
+								childNS := string(child.NamespaceURI())
+								childName := string(child.LocalName())
+								violations = append(violations, Violation{
+									Element: child,
+									Code:    "cvc-wildcard.2",
+									Message: fmt.Sprintf("Element '{%s}%s' is not allowed by the namespace constraint '%s'",
+										childNS, childName, wildcard.Namespace),
+								})
+								wildcardViolation = true
+								break
+							}
+						}
+					}
+
+					// If no wildcard violation was found, report as unexpected element
+					if !wildcardViolation {
+						violations = append(violations, Violation{
+							Element: child,
+							Code:    "cvc-complex-type.2.4.d",
+							Message: fmt.Sprintf("Unexpected element '%s'", child.LocalName()),
+						})
+					}
 					childIndex++
 				}
 			}
@@ -2106,11 +2130,37 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 
 	// Check remaining children
 	for childIndex < len(children) {
-		violations = append(violations, Violation{
-			Element: children[childIndex],
-			Code:    "cvc-complex-type.2.4.d",
-			Message: fmt.Sprintf("Unexpected element '%s'", children[childIndex].LocalName()),
-		})
+		child := children[childIndex]
+
+		// Check if this element would have matched a wildcard but violated namespace constraint
+		wildcardViolation := false
+		for _, particle := range mg.Particles {
+			if wildcard, isWildcard := particle.(*AnyElement); isWildcard {
+				// Check if element doesn't match wildcard's namespace constraint
+				if !MatchesWildcard(child, wildcard.Namespace, schema.TargetNamespace) {
+					// Element violates wildcard namespace constraint
+					childNS := string(child.NamespaceURI())
+					childName := string(child.LocalName())
+					violations = append(violations, Violation{
+						Element: child,
+						Code:    "cvc-wildcard.2",
+						Message: fmt.Sprintf("Element '{%s}%s' is not allowed by the namespace constraint '%s'",
+							childNS, childName, wildcard.Namespace),
+					})
+					wildcardViolation = true
+					break
+				}
+			}
+		}
+
+		// If no wildcard violation was found, report as unexpected element
+		if !wildcardViolation {
+			violations = append(violations, Violation{
+				Element: child,
+				Code:    "cvc-complex-type.2.4.d",
+				Message: fmt.Sprintf("Unexpected element '%s'", child.LocalName()),
+			})
+		}
 		childIndex++
 	}
 
