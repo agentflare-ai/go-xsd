@@ -23,12 +23,6 @@ const (
 	downloadMarker = ".w3c_test_suite_downloaded"
 )
 
-// downloadInfo stores metadata about the downloaded test suite
-type downloadInfo struct {
-	DownloadedAt time.Time
-	URL          string
-}
-
 // ensureTestSuite ensures the test suite exists, downloading if necessary
 // Returns true if download occurred, false if using cached version
 func ensureTestSuite(dir string, autoDownload bool) (bool, error) {
@@ -155,7 +149,7 @@ func downloadAndExtract(url, destDir string) error {
 
 		// Strip common prefix if present
 		targetPath := header.Name
-		if commonPrefix != "" && filepath.HasPrefix(header.Name, commonPrefix) {
+		if commonPrefix != "" && strings.HasPrefix(header.Name, commonPrefix) {
 			targetPath = header.Name[len(commonPrefix):]
 			// Skip if this is just the top-level directory itself
 			if targetPath == "" {
@@ -165,7 +159,7 @@ func downloadAndExtract(url, destDir string) error {
 
 		// Security check: prevent path traversal
 		target := filepath.Join(tempDir, targetPath)
-		if !filepath.HasPrefix(filepath.Clean(target), filepath.Clean(tempDir)) {
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(tempDir)) {
 			return fmt.Errorf("illegal file path in archive: %s", header.Name)
 		}
 
