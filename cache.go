@@ -2,6 +2,7 @@ package xsd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -165,6 +166,7 @@ func (sc *SchemaCache) loadSchema(path string) (*Schema, error) {
 			if _, err := sc.Get(importPath); err != nil {
 				// Log warning but don't fail
 				// Imports might be optional or resolved differently
+				slog.Warn("failed to load imported schema", "location", importPath, "error", err)
 			}
 		}
 	}

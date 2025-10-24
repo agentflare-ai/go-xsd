@@ -115,7 +115,7 @@ func validateDecimal(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid decimal value: %s", value)
 	}
-	
+
 	// Try parsing with big.Float for arbitrary precision
 	_, _, err := new(big.Float).Parse(value, 10)
 	if err != nil {
@@ -130,7 +130,7 @@ func validateFloat(value string) error {
 	case "INF", "+INF", "-INF", "NaN":
 		return nil
 	}
-	
+
 	// Try parsing as float32
 	_, err := strconv.ParseFloat(value, 32)
 	if err != nil {
@@ -145,7 +145,7 @@ func validateDouble(value string) error {
 	case "INF", "+INF", "-INF", "NaN":
 		return nil
 	}
-	
+
 	// Try parsing as float64
 	_, err := strconv.ParseFloat(value, 64)
 	if err != nil {
@@ -161,12 +161,12 @@ func validateDuration(value string) error {
 	if !pattern.MatchString(value) && value != "P0Y" && value != "PT0S" && value != "P" {
 		return fmt.Errorf("invalid duration value: %s", value)
 	}
-	
+
 	// Must have at least one component
 	if value == "P" || value == "-P" || value == "PT" || value == "-PT" {
 		return fmt.Errorf("duration must have at least one time component: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -181,13 +181,13 @@ func validateDateTime(value string) error {
 		"2006-01-02T15:04:05.999Z",
 		"2006-01-02T15:04:05.999-07:00",
 	}
-	
+
 	for _, format := range formats {
 		if _, err := time.Parse(format, value); err == nil {
 			return nil
 		}
 	}
-	
+
 	return fmt.Errorf("invalid dateTime value: %s", value)
 }
 
@@ -197,7 +197,7 @@ func validateTime(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid time value: %s", value)
 	}
-	
+
 	// Validate hour, minute, second ranges
 	parts := strings.Split(value, ":")
 	hour, _ := strconv.Atoi(parts[0])
@@ -207,11 +207,11 @@ func validateTime(value string) error {
 		secondPart = secondPart[:idx]
 	}
 	second, _ := strconv.Atoi(secondPart)
-	
+
 	if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
 		return fmt.Errorf("invalid time value: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -221,7 +221,7 @@ func validateDate(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid date value: %s", value)
 	}
-	
+
 	// Extract date parts
 	datePart := value
 	// Look for timezone suffix (Z or +/-HH:MM)
@@ -233,12 +233,12 @@ func validateDate(value string) error {
 		if len(value) >= 6 {
 			// Check if the last 6 chars match timezone pattern
 			if (value[len(value)-6] == '+' || value[len(value)-6] == '-') &&
-			   value[len(value)-3] == ':' {
+				value[len(value)-3] == ':' {
 				datePart = value[:len(value)-6]
 			}
 		}
 	}
-	
+
 	// Handle negative years
 	isNegativeYear := strings.HasPrefix(datePart, "-")
 	if isNegativeYear {
@@ -246,13 +246,13 @@ func validateDate(value string) error {
 		// For now, just check the pattern is correct
 		return nil
 	}
-	
+
 	// Parse the date
 	_, err := time.Parse("2006-01-02", datePart)
 	if err != nil {
 		return fmt.Errorf("invalid date value: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -262,7 +262,7 @@ func validateGYearMonth(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid gYearMonth value: %s", value)
 	}
-	
+
 	// Validate month
 	parts := strings.Split(value, "-")
 	monthStr := parts[len(parts)-1]
@@ -273,7 +273,7 @@ func validateGYearMonth(value string) error {
 	if month < 1 || month > 12 {
 		return fmt.Errorf("invalid month in gYearMonth: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -292,7 +292,7 @@ func validateGMonthDay(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid gMonthDay value: %s", value)
 	}
-	
+
 	// Validate month and day
 	parts := strings.Split(value[2:], "-") // Skip initial --
 	month, _ := strconv.Atoi(parts[0])
@@ -301,11 +301,11 @@ func validateGMonthDay(value string) error {
 		dayStr = dayStr[:idx]
 	}
 	day, _ := strconv.Atoi(dayStr)
-	
+
 	if month < 1 || month > 12 || day < 1 || day > 31 {
 		return fmt.Errorf("invalid gMonthDay value: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -315,7 +315,7 @@ func validateGDay(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid gDay value: %s", value)
 	}
-	
+
 	// Validate day
 	dayStr := value[3:]
 	if idx := strings.IndexAny(dayStr, "Z+-"); idx >= 0 {
@@ -325,7 +325,7 @@ func validateGDay(value string) error {
 	if day < 1 || day > 31 {
 		return fmt.Errorf("invalid gDay value: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -335,7 +335,7 @@ func validateGMonth(value string) error {
 	if !pattern.MatchString(value) {
 		return fmt.Errorf("invalid gMonth value: %s", value)
 	}
-	
+
 	// Validate month
 	monthStr := value[2:]
 	if idx := strings.IndexAny(monthStr, "Z+-"); idx >= 0 {
@@ -345,7 +345,7 @@ func validateGMonth(value string) error {
 	if month < 1 || month > 12 {
 		return fmt.Errorf("invalid gMonth value: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -354,7 +354,7 @@ func validateHexBinary(value string) error {
 	if len(value)%2 != 0 {
 		return fmt.Errorf("hexBinary must have even number of characters: %s", value)
 	}
-	
+
 	// Try decoding
 	_, err := hex.DecodeString(value)
 	if err != nil {
@@ -384,13 +384,13 @@ func validateQName(value string) error {
 	if len(parts) > 2 {
 		return fmt.Errorf("invalid QName: too many colons: %s", value)
 	}
-	
+
 	for _, part := range parts {
 		if err := validateNCName(part); err != nil {
 			return fmt.Errorf("invalid QName: %s", value)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -416,15 +416,15 @@ func validateToken(value string) error {
 	if err := validateNormalizedString(value); err != nil {
 		return err
 	}
-	
+
 	if strings.HasPrefix(value, " ") || strings.HasSuffix(value, " ") {
 		return fmt.Errorf("token cannot have leading or trailing spaces")
 	}
-	
+
 	if strings.Contains(value, "  ") {
 		return fmt.Errorf("token cannot have multiple consecutive spaces")
 	}
-	
+
 	return nil
 }
 
@@ -442,21 +442,21 @@ func validateName(value string) error {
 	if value == "" {
 		return fmt.Errorf("Name cannot be empty")
 	}
-	
+
 	// Name starts with letter, underscore, or colon
 	// Continues with letters, digits, '.', '-', '_', ':'
 	first := rune(value[0])
 	if !unicode.IsLetter(first) && first != '_' && first != ':' {
 		return fmt.Errorf("Name must start with letter, underscore, or colon: %s", value)
 	}
-	
+
 	for _, r := range value[1:] {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && 
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
 			r != '.' && r != '-' && r != '_' && r != ':' {
 			return fmt.Errorf("invalid character in Name: %s", string(r))
 		}
 	}
-	
+
 	return nil
 }
 
@@ -465,11 +465,11 @@ func validateNCName(value string) error {
 	if err := validateName(value); err != nil {
 		return err
 	}
-	
+
 	if strings.Contains(value, ":") {
 		return fmt.Errorf("NCName cannot contain colons: %s", value)
 	}
-	
+
 	return nil
 }
 
@@ -488,7 +488,7 @@ func validateIDREFS(value string) error {
 	if value == "" {
 		return fmt.Errorf("IDREFS cannot be empty")
 	}
-	
+
 	ids := strings.Fields(value)
 	for _, id := range ids {
 		if err := validateIDREF(id); err != nil {
@@ -508,7 +508,7 @@ func validateENTITIES(value string) error {
 	if value == "" {
 		return fmt.Errorf("ENTITIES cannot be empty")
 	}
-	
+
 	entities := strings.Fields(value)
 	for _, entity := range entities {
 		if err := validateENTITY(entity); err != nil {
@@ -523,14 +523,14 @@ func validateNMTOKEN(value string) error {
 	if value == "" {
 		return fmt.Errorf("NMTOKEN cannot be empty")
 	}
-	
+
 	for _, r := range value {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && 
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
 			r != '.' && r != '-' && r != '_' && r != ':' {
 			return fmt.Errorf("invalid character in NMTOKEN: %s", string(r))
 		}
 	}
-	
+
 	return nil
 }
 
@@ -539,7 +539,7 @@ func validateNMTOKENS(value string) error {
 	if value == "" {
 		return fmt.Errorf("NMTOKENS cannot be empty")
 	}
-	
+
 	tokens := strings.Fields(value)
 	for _, token := range tokens {
 		if err := validateNMTOKEN(token); err != nil {
@@ -553,7 +553,7 @@ func validateNMTOKENS(value string) error {
 
 func validateInteger(value string) error {
 	// Integer is decimal with no fractional part
-	if _, err := new(big.Int).SetString(value, 10); err == false {
+	if _, ok := new(big.Int).SetString(value, 10); !ok {
 		return fmt.Errorf("invalid integer value: %s", value)
 	}
 	return nil
@@ -582,12 +582,9 @@ func validateNegativeInteger(value string) error {
 }
 
 func validateLong(value string) error {
-	v, err := strconv.ParseInt(value, 10, 64)
+	_, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid long value: %s", value)
-	}
-	if v < math.MinInt64 || v > math.MaxInt64 {
-		return fmt.Errorf("long value out of range: %s", value)
 	}
 	return nil
 }
@@ -637,12 +634,9 @@ func validateNonNegativeInteger(value string) error {
 }
 
 func validateUnsignedLong(value string) error {
-	v, err := strconv.ParseUint(value, 10, 64)
+	_, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid unsignedLong value: %s", value)
-	}
-	if v > math.MaxUint64 {
-		return fmt.Errorf("unsignedLong value out of range: %s", value)
 	}
 	return nil
 }

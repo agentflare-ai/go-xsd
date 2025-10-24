@@ -78,18 +78,73 @@ func (v *Validator) Validate(doc xmldom.Document) []Violation {
 
 // collectIDsAndRefs collects all ID and IDREF attributes in the document
 func (v *Validator) collectIDsAndRefs(elem xmldom.Element) {
+	// Get the element's type from schema
+	elemNS := string(elem.NamespaceURI())
+	elemLocal := string(elem.LocalName())
+	qname := QName{Namespace: elemNS, Local: elemLocal}
+
+	v.schema.mu.RLock()
+	decl, found := v.schema.ElementDecls[qname]
+	v.schema.mu.RUnlock()
+
+	if !found && elemNS == "" && v.schema.TargetNamespace != "" {
+		qname.Namespace = v.schema.TargetNamespace
+		v.schema.mu.RLock()
+		decl = v.schema.ElementDecls[qname]
+		v.schema.mu.RUnlock()
+	}
+
+	// Pre-defined types to avoid allocations in hot path
+	var (
+		idType = &SimpleType{
+			QName: QName{Namespace: XSDNamespace, Local: "ID"},
+		}
+		idrefType = &SimpleType{
+			QName: QName{Namespace: XSDNamespace, Local: "IDREF"},
+		}
+	)
+
+	// Common IDREF attribute names for fallback detection
+	var idrefAttrNames = [...]string{"target", "ref", "idref", "IDREF", "idlocation", "sendid"}
+
 	// Check all attributes for ID and IDREF types
 	attrs := elem.Attributes()
 	for i := uint(0); i < attrs.Length(); i++ {
 		attr := attrs.Item(i)
-		if attr != nil {
-			attrName := string(attr.LocalName())
-			attrValue := string(attr.NodeValue())
+		if attr == nil {
+			continue
+		}
 
-			// Check if this attribute is of type ID
-			// For simplicity, we'll check common ID attribute names
-			// In a full implementation, we'd check the schema type
+		// Convert strings only once
+		attrNS := string(attr.NamespaceURI())
+		attrName := string(attr.LocalName())
+
+		// Skip namespace declarations early
+		if attrNS == "http://www.w3.org/2000/xmlns/" || attrNS == "xmlns" || attrName == "xmlns" {
+			continue
+		}
+
+		attrValue := string(attr.NodeValue())
+
+		// Get attribute type from schema
+		attrType := v.getAttributeType(decl, attrName)
+		if attrType == nil {
+			// Fallback to name-based detection for backward compatibility
 			if attrName == "id" || attrName == "ID" {
+				attrType = idType
+			} else {
+				for _, refName := range idrefAttrNames {
+					if attrName == refName {
+						attrType = idrefType
+						break
+					}
+				}
+			}
+		}
+
+		if attrType != nil {
+			// Check if type derives from xs:ID
+			if v.derivesFromBuiltinType(attrType, "ID") {
 				if _, exists := v.ids[attrValue]; exists {
 					v.addViolation(elem, attrName, "cvc-id.2",
 						fmt.Sprintf("Duplicate ID value '%s'", attrValue), nil, attrValue)
@@ -98,12 +153,18 @@ func (v *Validator) collectIDsAndRefs(elem xmldom.Element) {
 				}
 			}
 
-			// Check common IDREF attribute names
-			idrefAttrs := []string{"target", "ref", "idref", "IDREF", "idlocation", "sendid"}
-			for _, refName := range idrefAttrs {
-				if attrName == refName && attrValue != "" {
+			// Check if type derives from xs:IDREF or xs:IDREFS
+			if v.derivesFromBuiltinType(attrType, "IDREF") {
+				if attrValue != "" {
 					v.idRefs[attrValue] = elem
-					break
+				}
+			} else if v.derivesFromBuiltinType(attrType, "IDREFS") {
+				if attrValue != "" {
+					// For IDREFS, split by whitespace
+					refs := strings.Fields(attrValue)
+					for _, ref := range refs {
+						v.idRefs[ref] = elem
+					}
 				}
 			}
 		}
@@ -116,6 +177,80 @@ func (v *Validator) collectIDsAndRefs(elem xmldom.Element) {
 			v.collectIDsAndRefs(child)
 		}
 	}
+}
+
+// getAttributeType returns the type of an attribute from the element declaration
+func (v *Validator) getAttributeType(elemDecl *ElementDecl, attrName string) Type {
+	if elemDecl == nil || elemDecl.Type == nil {
+		return nil
+	}
+
+	// Check if element type is a complex type
+	ct, ok := elemDecl.Type.(*ComplexType)
+	if !ok {
+		return nil
+	}
+
+	// Check direct attributes
+	for _, attr := range ct.Attributes {
+		if attr.Name.Local == attrName {
+			return attr.Type
+		}
+	}
+
+	// Check attribute groups
+	groupAttrs := v.schema.ResolveAttributeGroups(ct)
+	for _, attr := range groupAttrs {
+		if attr.Name.Local == attrName {
+			return attr.Type
+		}
+	}
+
+	return nil
+}
+
+// derivesFromBuiltinType checks if a type derives from a specific XSD builtin type
+func (v *Validator) derivesFromBuiltinType(t Type, builtinName string) bool {
+	visited := make(map[QName]bool, 8) // Pre-allocate for typical depth
+	return v.derivesFromBuiltinTypeWithCycleDetection(t, builtinName, visited)
+}
+
+// derivesFromBuiltinTypeWithCycleDetection checks type derivation with cycle detection
+func (v *Validator) derivesFromBuiltinTypeWithCycleDetection(t Type, builtinName string, visited map[QName]bool) bool {
+	if t == nil {
+		return false
+	}
+
+	typeName := t.Name()
+
+	// Check if it's the builtin type directly
+	if typeName.Namespace == XSDNamespace && typeName.Local == builtinName {
+		return true
+	}
+
+	// Cycle detection: prevent infinite recursion
+	if visited[typeName] {
+		return false
+	}
+	visited[typeName] = true
+
+	// Check if it's a simple type with a restriction
+	if st, ok := t.(*SimpleType); ok {
+		if st.Restriction != nil && st.Restriction.Base.Local != "" {
+			// Check base type directly
+			if st.Restriction.Base.Namespace == XSDNamespace && st.Restriction.Base.Local == builtinName {
+				return true
+			}
+
+			// Recursively check base type
+			baseType := v.schema.TypeDefs[st.Restriction.Base]
+			if baseType != nil {
+				return v.derivesFromBuiltinTypeWithCycleDetection(baseType, builtinName, visited)
+			}
+		}
+	}
+
+	return false
 }
 
 // validateElement validates an element against the schema
@@ -347,6 +482,36 @@ func (v *Validator) validateAttributeType(elem xmldom.Element, attrName string, 
 		return violations
 	}
 
+	// Handle union types
+	if simpleType.Union != nil {
+		err := ValidateUnionType(value, simpleType.Union, v.schema)
+		if err != nil {
+			violations = append(violations, Violation{
+				Element:   elem,
+				Code:      "cvc-datatype-valid.1.2.1",
+				Message:   fmt.Sprintf("Attribute '%s': %s", attrName, err.Error()),
+				Attribute: attrName,
+				Actual:    value,
+			})
+		}
+		return violations
+	}
+
+	// Handle list types
+	if simpleType.List != nil {
+		err := ValidateListType(value, simpleType.List, v.schema)
+		if err != nil {
+			violations = append(violations, Violation{
+				Element:   elem,
+				Code:      "cvc-datatype-valid.1.2.1",
+				Message:   fmt.Sprintf("Attribute '%s': %s", attrName, err.Error()),
+				Attribute: attrName,
+				Actual:    value,
+			})
+		}
+		return violations
+	}
+
 	// If it has a restriction, validate against facets
 	if simpleType.Restriction != nil {
 		for _, facet := range simpleType.Restriction.Facets {
@@ -373,8 +538,6 @@ func (v *Validator) validateAttributeType(elem xmldom.Element, attrName string, 
 			}
 		}
 	}
-
-	// TODO: Handle List and Union types
 
 	return violations
 }
@@ -478,29 +641,6 @@ func (v *Validator) validateIDREFs() {
 				nil, idref)
 		}
 	}
-}
-
-// matchesNamespace checks if a namespace matches a wildcard pattern
-func (v *Validator) matchesNamespace(ns, pattern string) bool {
-	if pattern == "##any" {
-		return true
-	}
-	if pattern == "##other" {
-		return ns != v.schema.TargetNamespace
-	}
-	if pattern == "##targetNamespace" {
-		return ns == v.schema.TargetNamespace
-	}
-	if pattern == "##local" {
-		return ns == ""
-	}
-	// Check explicit namespace list
-	for _, allowed := range strings.Fields(pattern) {
-		if allowed == ns {
-			return true
-		}
-	}
-	return false
 }
 
 // suggestAttribute suggests similar attribute names

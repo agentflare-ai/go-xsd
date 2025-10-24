@@ -340,7 +340,11 @@ func (sv *SchemaValidator) validateOccurrences(elem xmldom.Element) {
 			sv.addErrorAt(elem, fmt.Sprintf("invalid minOccurs value '%s': must be non-negative integer", minStr))
 			return
 		}
-		fmt.Sscanf(minStr, "%d", &minVal)
+		_, err := fmt.Sscanf(minStr, "%d", &minVal)
+		if err != nil {
+			sv.addErrorAt(elem, fmt.Sprintf("invalid minOccurs value '%s': must be a valid integer", minStr))
+			return
+		}
 	}
 
 	if maxOccurs != "" {
@@ -350,7 +354,11 @@ func (sv *SchemaValidator) validateOccurrences(elem xmldom.Element) {
 				sv.addErrorAt(elem, fmt.Sprintf("invalid maxOccurs value '%s': must be non-negative integer or 'unbounded'", maxStr))
 				return
 			}
-			fmt.Sscanf(maxStr, "%d", &maxVal)
+			_, err := fmt.Sscanf(maxStr, "%d", &maxVal)
+			if err != nil {
+				sv.addErrorAt(elem, fmt.Sprintf("invalid maxOccurs value '%s': must be a valid integer", maxStr))
+				return
+			}
 
 			// Check min <= max
 			if minVal > maxVal {

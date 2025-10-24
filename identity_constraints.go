@@ -180,10 +180,8 @@ func (v *IdentityConstraintValidator) evaluateSimpleXPath(root xmldom.Element, x
 	xpath = removeNamespacePrefixes(xpath)
 
 	// Handle absolute paths (starting with /)
-	if strings.HasPrefix(xpath, "/") {
-		// For now, treat absolute paths as starting from root
-		xpath = strings.TrimPrefix(xpath, "/")
-	}
+	// For now, treat absolute paths as starting from root
+	xpath = strings.TrimPrefix(xpath, "/")
 
 	// Handle descendant-or-self axis (.// or //)
 	searchDescendants := false
