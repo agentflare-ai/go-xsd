@@ -1851,8 +1851,41 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 		child := children[childIndex]
 		particle := mg.Particles[particleIndex]
 
-		// Special handling for nested model groups (group references)
-		if nestedGroup, isModelGroup := particle.(*ModelGroup); isModelGroup {
+		// Special handling for group references
+		if groupRef, isGroupRef := particle.(*GroupRef); isGroupRef {
+			// Resolve the group reference
+			if resolvedGroup, exists := schema.Groups[groupRef.Ref]; exists {
+				// Treat it as a nested model group
+				var nestedViolations []Violation
+				var consumed int
+
+				switch resolvedGroup.Kind {
+				case ChoiceGroup:
+					consumed, nestedViolations = mg.matchChoiceGroup(resolvedGroup, children[childIndex:], schema)
+				case SequenceGroup:
+					nestedViolations = resolvedGroup.validateSequence(children[childIndex:], schema)
+					consumed = mg.countConsumedByGroup(resolvedGroup, children[childIndex:], schema)
+				case AllGroup:
+					nestedViolations = resolvedGroup.validateAll(children[childIndex:], schema)
+					consumed = mg.countConsumedByGroup(resolvedGroup, children[childIndex:], schema)
+				}
+
+				childIndex += consumed
+				// Only add violations if the group is required OR if it consumed some children
+				if groupRef.MinOcc > 0 || consumed > 0 {
+					violations = append(violations, nestedViolations...)
+				} else {
+					// Group is optional and didn't consume - only add real constraint violations
+					for _, v := range nestedViolations {
+						if v.Code == "cvc-wildcard.2" {
+							violations = append(violations, v)
+						}
+					}
+				}
+			}
+			particleIndex++
+		} else if nestedGroup, isModelGroup := particle.(*ModelGroup); isModelGroup {
+			// Special handling for nested model groups (inline groups)
 			// When a ModelGroup is a particle in a sequence, we need to inline its validation
 			// The nested group should consume children according to its own kind (sequence/choice/all)
 			var nestedViolations []Violation
@@ -1874,7 +1907,20 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 			}
 
 			childIndex += consumed
-			violations = append(violations, nestedViolations...)
+			// Only add violations if the group is required OR if it consumed some children
+			if nestedGroup.MinOccurs() > 0 || consumed > 0 {
+				violations = append(violations, nestedViolations...)
+			} else {
+				// Group is optional and didn't consume - only add violations that are real constraint errors
+				// Namespace constraint violations (cvc-wildcard.2) are real errors
+				// "Unexpected element" violations (cvc-complex-type.2.4.d) from optional content can be ignored
+				for _, v := range nestedViolations {
+					if v.Code == "cvc-wildcard.2" {
+						// Namespace constraint violation - this is a real error
+						violations = append(violations, v)
+					}
+				}
+			}
 			particleIndex++
 		} else if wildcard, isWildcard := particle.(*AnyElement); isWildcard {
 			// Check if child matches wildcard
@@ -1893,9 +1939,12 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 				}
 				particleIndex++
 			} else {
-				// Child doesn't match wildcard
+				// Child doesn't match wildcard namespace constraint
+				childNS := string(child.NamespaceURI())
+				childName := string(child.LocalName())
+
 				if wildcard.MinOcc == 0 {
-					// Wildcard is optional, skip to next particle
+					// Wildcard is optional, skip to next particle without error
 					// Check if element matches next particle
 					if particleIndex+1 < len(mg.Particles) {
 						nextParticle := mg.Particles[particleIndex+1]
@@ -1905,22 +1954,18 @@ func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema
 							continue
 						}
 					}
-					// Element doesn't match next particle either, report namespace constraint violation
-					violations = append(violations, Violation{
-						Element: child,
-						Code:    "cvc-wildcard.2",
-						Message: fmt.Sprintf("Element '%s' is not allowed by the namespace constraint '%s'",
-							child.LocalName(), wildcard.Namespace),
-					})
-					childIndex++
+					// Element doesn't match next particle either
+					// Since wildcard is optional and we're at the end of particles or
+					// the element doesn't match the next particle, just skip the wildcard
+					// The element will be handled by remaining children logic
 					particleIndex++
 				} else {
 					// Required wildcard doesn't match
 					violations = append(violations, Violation{
 						Element: child,
 						Code:    "cvc-wildcard.2",
-						Message: fmt.Sprintf("Element '%s' is not allowed by the namespace constraint '%s'",
-							child.LocalName(), wildcard.Namespace),
+						Message: fmt.Sprintf("Element '{%s}%s' is not allowed by the namespace constraint '%s'",
+							childNS, childName, wildcard.Namespace),
 					})
 					childIndex++
 				}
@@ -2192,6 +2237,10 @@ func (mg *ModelGroup) matchChoiceGroup(choiceGroup *ModelGroup, children []xmldo
 						typeViolations := decl.Type.Validate(child, schema)
 						violations = append(violations, typeViolations...)
 					}
+				} else if wildcard, isWildcard := particle.(*AnyElement); isWildcard {
+					// Validate wildcard element according to processContents
+					wildcardViolations := ValidateAnyElement(child, wildcard, schema)
+					violations = append(violations, wildcardViolations...)
 				}
 				break // Found a match, stop trying other particles
 			}
@@ -2199,8 +2248,43 @@ func (mg *ModelGroup) matchChoiceGroup(choiceGroup *ModelGroup, children []xmldo
 
 		if !matched {
 			// No particle in the choice matched this child
-			// Stop consuming (choice can't match this element)
-			break
+			// Check if there's a wildcard (possibly nested in groups) that explains the failure
+			// This provides better error messages
+			wildcardFound := false
+			var findWildcard func([]Particle) *AnyElement
+			findWildcard = func(particles []Particle) *AnyElement {
+				for _, p := range particles {
+					if wc, ok := p.(*AnyElement); ok {
+						return wc
+					}
+					if nested, ok := p.(*ModelGroup); ok {
+						if wc := findWildcard(nested.Particles); wc != nil {
+							return wc
+						}
+					}
+				}
+				return nil
+			}
+
+			if wildcard := findWildcard(choiceGroup.Particles); wildcard != nil {
+				// Found a wildcard in the choice (possibly nested)
+				// Report namespace constraint violation
+				childNS := string(child.NamespaceURI())
+				childName := string(child.LocalName())
+				violations = append(violations, Violation{
+					Element: child,
+					Code:    "cvc-wildcard.2",
+					Message: fmt.Sprintf("Element '{%s}%s' is not allowed by the namespace constraint '%s'",
+						childNS, childName, wildcard.Namespace),
+				})
+				consumed++ // Consume the invalid element to continue validation
+				wildcardFound = true
+			}
+
+			if !wildcardFound {
+				// Stop consuming (choice can't match this element)
+				break
+			}
 		}
 	}
 
@@ -2405,9 +2489,18 @@ func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Parti
 		// Check if element matches the wildcard's namespace constraint
 		return MatchesWildcard(elem, p.Namespace, schema.TargetNamespace)
 	case *ModelGroup:
-		// Nested group validation
-		violations := p.Validate(elem, schema)
-		return len(violations) == 0
+		// For a nested group in a choice, recursively check if element matches any particle in the group
+		// Don't just validate, because optional particles validate successfully even when not matching
+		var checkGroupMatch func(*ModelGroup) bool
+		checkGroupMatch = func(group *ModelGroup) bool {
+			for _, gp := range group.Particles {
+				if mg.elementMatchesParticle(elem, gp, schema) {
+					return true
+				}
+			}
+			return false
+		}
+		return checkGroupMatch(p)
 	}
 	return false
 }

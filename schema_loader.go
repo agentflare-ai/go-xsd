@@ -36,8 +36,7 @@ type SchemaLoaderConfig struct {
 	HTTPClient *http.Client
 
 	// Pattern-based loaders for namespace resolution
-	// Map key is regex pattern, value is loader function
-	Loaders map[string]SchemaLoaderFunc
+	Loaders []PatternLoader
 }
 
 // SchemaLoader handles loading schemas with import/include support
@@ -78,18 +77,14 @@ func NewSchemaLoader(config SchemaLoaderConfig) (*SchemaLoader, error) {
 		loader.httpClient = http.DefaultClient
 	}
 
-	// Compile regex patterns and create pattern loaders
-	for pattern, loaderFunc := range config.Loaders {
-		regex, err := regexp.Compile(pattern)
+	// Compile regex patterns for each loader
+	for i := range config.Loaders {
+		regex, err := regexp.Compile(config.Loaders[i].Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("invalid pattern %s: %w", pattern, err)
+			return nil, fmt.Errorf("invalid pattern %s: %w", config.Loaders[i].Pattern, err)
 		}
-
-		loader.loaders = append(loader.loaders, &PatternLoader{
-			Pattern: pattern,
-			Loader:  loaderFunc,
-			regex:   regex,
-		})
+		config.Loaders[i].regex = regex
+		loader.loaders = append(loader.loaders, &config.Loaders[i])
 	}
 
 	return loader, nil
@@ -100,7 +95,7 @@ func NewSchemaLoader(config SchemaLoaderConfig) (*SchemaLoader, error) {
 func NewSchemaLoaderSimple(baseDir string) *SchemaLoader {
 	loader, _ := NewSchemaLoader(SchemaLoaderConfig{
 		BaseDir: baseDir,
-		Loaders: make(map[string]SchemaLoaderFunc),
+		Loaders: []PatternLoader{},
 	})
 	return loader
 }
