@@ -21,6 +21,8 @@ func main() {
 		analyze      = flag.Bool("analyze", false, "Generate failure analysis report")
 		autoDownload = flag.Bool("auto-download", false, "Automatically download W3C test suite if not found")
 		forceDownload = flag.Bool("force-download", false, "Force re-download even if cached (implies --auto-download)")
+		strictContent = flag.Bool("strict-content", false, "Enable strict content-model validation")
+		grepFilter    = flag.String("grep", "", "Only run tests whose set/group/name contains this substring (case-insensitive)")
 	)
 
 	flag.Parse()
@@ -43,9 +45,11 @@ func main() {
 		fmt.Printf("Note: Downloaded test suite is cached for %v\n\n", cacheDuration)
 	}
 
-	// Create test runner
-	runner := xsd.NewW3CTestRunner(*testSuiteDir)
-	runner.Verbose = *verbose
+// Create test runner
+runner := xsd.NewW3CTestRunner(*testSuiteDir)
+runner.Verbose = *verbose
+runner.StrictContentModel = *strictContent
+runner.Grep = *grepFilter
 
 	// Run tests
 	if *testFile != "" {

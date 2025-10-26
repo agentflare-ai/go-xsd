@@ -106,9 +106,16 @@ func ValidateAnyElement(elem xmldom.Element, wildcard *AnyElement, schema *Schem
 
 	switch mode {
 	case StrictProcess:
-		// Must validate against element declaration
+		// Must validate against element declaration (search in main and imported schemas)
 		qname := QName{Namespace: elemNS, Local: elemName}
-		if decl, found := schema.ElementDecls[qname]; found {
+		var decl *ElementDecl
+		if d, found := schema.ElementDecls[qname]; found { decl = d }
+		if decl == nil {
+			for _, imp := range schema.ImportedSchemas {
+				if d, ok := imp.ElementDecls[qname]; ok { decl = d; break }
+			}
+		}
+		if decl != nil {
 			// Validate element against its declaration
 			if decl.Type != nil {
 				typeViolations := decl.Type.Validate(elem, schema)
@@ -125,14 +132,17 @@ func ValidateAnyElement(elem xmldom.Element, wildcard *AnyElement, schema *Schem
 		}
 
 	case LaxProcess:
-		// Validate if declaration is found, otherwise allow
+		// Validate if declaration is found (in main or imported schemas), otherwise allow
 		qname := QName{Namespace: elemNS, Local: elemName}
-		if decl, found := schema.ElementDecls[qname]; found {
-			// Found declaration, validate against it
-			if decl.Type != nil {
-				typeViolations := decl.Type.Validate(elem, schema)
-				violations = append(violations, typeViolations...)
+		var decl *ElementDecl
+		if d, found := schema.ElementDecls[qname]; found { decl = d }
+		if decl == nil {
+			for _, imp := range schema.ImportedSchemas {
+				if d, ok := imp.ElementDecls[qname]; ok { decl = d; break }
 			}
+		}
+		if decl != nil && decl.Type != nil {
+			violations = append(violations, decl.Type.Validate(elem, schema)...)
 		}
 		// If no declaration found, that's OK in lax mode
 

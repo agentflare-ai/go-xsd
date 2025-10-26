@@ -91,16 +91,20 @@ type W3CTestResult struct {
 
 // W3CTestRunner runs W3C XSD conformance tests
 type W3CTestRunner struct {
-	TestSuiteDir string
-	Results      []W3CTestResult
-	Verbose      bool
+	TestSuiteDir       string
+	Results            []W3CTestResult
+	Verbose            bool
+	StrictContentModel bool
+	Grep               string // optional substring filter on set/group/test names
 }
 
 // NewW3CTestRunner creates a test runner for the W3C test suite
 func NewW3CTestRunner(testSuiteDir string) *W3CTestRunner {
 	return &W3CTestRunner{
-		TestSuiteDir: testSuiteDir,
-		Results:      []W3CTestResult{},
+		TestSuiteDir:       testSuiteDir,
+		Results:            []W3CTestResult{},
+		StrictContentModel: false,
+		Grep:               "",
 	}
 }
 
@@ -130,6 +134,9 @@ func (r *W3CTestRunner) RunTestSet(testSet *W3CTestSet, metadataDir string) {
 	for _, group := range testSet.TestGroups {
 		// Run schema tests
 		for _, test := range group.SchemaTests {
+			if r.Grep != "" && !strings.Contains(strings.ToLower(testSet.Name+"/"+group.Name+"/"+test.Name), strings.ToLower(r.Grep)) {
+				continue
+			}
 			result := r.runSchemaTest(testSet.Name, group.Name, test, metadataDir)
 			r.Results = append(r.Results, result)
 
@@ -140,6 +147,9 @@ func (r *W3CTestRunner) RunTestSet(testSet *W3CTestSet, metadataDir string) {
 
 		// Run instance tests
 		for _, test := range group.InstanceTests {
+			if r.Grep != "" && !strings.Contains(strings.ToLower(testSet.Name+"/"+group.Name+"/"+test.Name), strings.ToLower(r.Grep)) {
+				continue
+			}
 			result := r.runInstanceTest(testSet.Name, group.Name, test, metadataDir)
 			r.Results = append(r.Results, result)
 
@@ -224,17 +234,20 @@ func (r *W3CTestRunner) runInstanceTest(testSet, testGroup string, test W3CInsta
 		instancePath = filepath.Join(filepath.Dir(metadataDir), test.InstanceDocument.Href)
 	}
 
-	// Load the schema
-	schema, err := LoadSchema(schemaPath)
-	if err != nil {
+// Load the schema
+schema, err := LoadSchema(schemaPath)
+if err != nil {
 		result.Actual = "error"
 		result.Error = fmt.Errorf("failed to load schema: %w", err)
 		result.Passed = false
 		return result
 	}
 
-	// Create validator
-	validator := NewValidator(schema)
+// Apply runner options
+schema.StrictContentModel = r.StrictContentModel
+
+// Create validator
+validator := NewValidator(schema)
 
 	// Load and validate the instance document
 	file, err := os.Open(instancePath)
@@ -253,6 +266,9 @@ func (r *W3CTestRunner) runInstanceTest(testSet, testGroup string, test W3CInsta
 		result.Passed = false
 		return result
 	}
+
+	// Load schemas hinted by xsi:schemaLocation on the instance (if any)
+	loadInstanceSchemaHints(schema, doc, filepath.Dir(instancePath))
 
 	// Validate
 	errors := validator.Validate(doc)
@@ -362,7 +378,50 @@ func (r *W3CTestRunner) RunMetadataFile(metadataPath string) error {
 	}
 
 	r.RunTestSet(testSet, metadataPath)
-	return nil
+return nil
+}
+
+// loadInstanceSchemaHints loads additional schemas referenced by xsi:schemaLocation hints on the instance root
+func loadInstanceSchemaHints(schema *Schema, doc xmldom.Document, baseDir string) {
+	if doc == nil || schema == nil { return }
+	root := doc.DocumentElement()
+	if root == nil { return }
+
+	// Parse xsi:schemaLocation (pairs of namespace and location)
+	sl := root.GetAttributeNS("http://www.w3.org/2001/XMLSchema-instance", "schemaLocation")
+	if sl != "" {
+		pairs := strings.Fields(string(sl))
+		for i := 0; i+1 < len(pairs); i += 2 {
+			ns := pairs[i]
+			loc := pairs[i+1]
+			// Resolve path relative to baseDir if not absolute
+			path := loc
+			if !filepath.IsAbs(loc) {
+				path = filepath.Join(baseDir, loc)
+			}
+			if loaded, err := LoadSchema(path); err == nil && loaded != nil {
+				if schema.ImportedSchemas == nil { schema.ImportedSchemas = make(map[string]*Schema) }
+				// Key by namespace if available; otherwise by path
+				key := ns
+				if key == "" { key = path }
+				schema.ImportedSchemas[key] = loaded
+			}
+		}
+	}
+
+	// Parse xsi:noNamespaceSchemaLocation
+	nn := root.GetAttributeNS("http://www.w3.org/2001/XMLSchema-instance", "noNamespaceSchemaLocation")
+	if nn != "" {
+		loc := string(nn)
+		path := loc
+		if !filepath.IsAbs(loc) {
+			path = filepath.Join(baseDir, loc)
+		}
+		if loaded, err := LoadSchema(path); err == nil && loaded != nil {
+			if schema.ImportedSchemas == nil { schema.ImportedSchemas = make(map[string]*Schema) }
+			schema.ImportedSchemas[path] = loaded
+		}
+	}
 }
 
 // RunAllTests discovers and runs all test metadata files

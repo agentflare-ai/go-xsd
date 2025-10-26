@@ -332,9 +332,11 @@ func (sv *SchemaValidator) validateOccurrences(elem xmldom.Element) {
 	maxOccurs := elem.GetAttribute("maxOccurs")
 
 	minVal := 1
-	maxVal := 1
+	maxVal := 1 // default when maxOccurs is absent per XSD
+	maxUnbounded := false
 
-	if minOccurs != "" {
+	// Treat presence of attribute even if empty string as invalid
+	if elem.HasAttribute("minOccurs") {
 		minStr := string(minOccurs)
 		if !isNonNegativeInteger(minStr) {
 			sv.addErrorAt(elem, fmt.Sprintf("invalid minOccurs value '%s': must be non-negative integer", minStr))
@@ -347,9 +349,11 @@ func (sv *SchemaValidator) validateOccurrences(elem xmldom.Element) {
 		}
 	}
 
-	if maxOccurs != "" {
+	if elem.HasAttribute("maxOccurs") {
 		maxStr := string(maxOccurs)
-		if maxStr != "unbounded" {
+		if maxStr == "unbounded" {
+			maxUnbounded = true
+		} else {
 			if !isNonNegativeInteger(maxStr) {
 				sv.addErrorAt(elem, fmt.Sprintf("invalid maxOccurs value '%s': must be non-negative integer or 'unbounded'", maxStr))
 				return
@@ -359,12 +363,12 @@ func (sv *SchemaValidator) validateOccurrences(elem xmldom.Element) {
 				sv.addErrorAt(elem, fmt.Sprintf("invalid maxOccurs value '%s': must be a valid integer", maxStr))
 				return
 			}
-
-			// Check min <= max
-			if minVal > maxVal {
-				sv.addErrorAt(elem, fmt.Sprintf("minOccurs (%d) cannot be greater than maxOccurs (%d)", minVal, maxVal))
-			}
 		}
+	}
+
+	// Enforce minOccurs <= maxOccurs, using defaults when attributes are absent
+	if !maxUnbounded && minVal > maxVal {
+		sv.addErrorAt(elem, fmt.Sprintf("minOccurs (%d) cannot be greater than maxOccurs (%d)", minVal, maxVal))
 	}
 }
 
@@ -416,8 +420,46 @@ func (sv *SchemaValidator) validateExtension(elem xmldom.Element) {
 func (sv *SchemaValidator) validateModelGroup(elem xmldom.Element) {
 	sv.validateOccurrences(elem)
 
-	// Special rules for xs:all
-	if string(elem.LocalName()) == "all" {
+	local := string(elem.LocalName())
+
+	// Disallow nested xs:all within sequence/choice, including via group reference
+	if local == "sequence" || local == "choice" {
+		children := elem.Children()
+		for i := uint(0); i < children.Length(); i++ {
+			child := children.Item(i)
+			if child == nil || string(child.NamespaceURI()) != XSDNamespace { continue }
+			cl := string(child.LocalName())
+			if cl == "all" {
+				sv.addErrorAt(child, "xs:all cannot appear as a child of xs:sequence or xs:choice (XSD 1.0)")
+			}
+			if cl == "group" {
+				ref := string(child.GetAttribute("ref"))
+				if ref != "" && sv.groupDefinitionIsAll(elem, ref) {
+					sv.addErrorAt(child, "xs:group referencing an xs:all cannot be nested within xs:sequence or xs:choice (XSD 1.0)")
+				}
+			}
+		}
+	}
+
+// Annotation placement rules: at most one xs:annotation, and it must be the first child among XSD elements
+{
+	annCount := 0
+	firstXsdIndex := -1
+	children := elem.Children()
+	for i := uint(0); i < children.Length(); i++ {
+		child := children.Item(i)
+		if child == nil || string(child.NamespaceURI()) != XSDNamespace { continue }
+		if firstXsdIndex == -1 { firstXsdIndex = int(i) }
+		if string(child.LocalName()) == "annotation" {
+			annCount++
+			if annCount > 1 { sv.addErrorAt(child, "Only one xs:annotation is permitted and it must be the first child") }
+			if int(i) != firstXsdIndex { sv.addErrorAt(child, "xs:annotation must appear before any other XSD children") }
+		}
+	}
+}
+
+// Special rules for xs:all
+	if local == "all" {
 		minOccurs := elem.GetAttribute("minOccurs")
 		maxOccurs := elem.GetAttribute("maxOccurs")
 
@@ -431,24 +473,92 @@ func (sv *SchemaValidator) validateModelGroup(elem xmldom.Element) {
 			sv.addErrorAt(elem, "xs:all maxOccurs must be 1")
 		}
 
-		// Children of xs:all must have maxOccurs 0 or 1 (in XSD 1.0)
+		// Parent constraints: xs:all must appear only as the content of xs:complexType, xs:restriction, or xs:group (XSD 1.0)
+		if p := elem.ParentNode(); p != nil {
+			pl := string(p.LocalName())
+			if pl != "complexType" && pl != "restriction" && pl != "group" {
+				sv.addErrorAt(elem, "xs:all may only appear as a child of complexType, restriction, or group (XSD 1.0)")
+			}
+		}
+
+		// xs:all must not have a name attribute (only xs:group can be named)
+		if elem.HasAttribute("name") {
+			sv.addErrorAt(elem, "xs:all cannot have a 'name' attribute; use a named xs:group to reference")
+		}
+
+		// Children of xs:all must be xs:element only (XSD 1.0), and each element must have minOccurs 0 or 1 and maxOccurs 1
 		children := elem.Children()
 		for i := uint(0); i < children.Length(); i++ {
 			child := children.Item(i)
-			if child != nil && string(child.LocalName()) == "element" {
-				childMax := child.GetAttribute("maxOccurs")
-				if childMax != "" && string(childMax) != "0" && string(childMax) != "1" {
-					sv.addErrorAt(child, "elements within xs:all must have maxOccurs of 0 or 1 (XSD 1.0)")
-				}
+			if child == nil || string(child.NamespaceURI()) != XSDNamespace {
+				continue
+			}
+			local := string(child.LocalName())
+			if local == "annotation" {
+				continue
+			}
+			if local != "element" {
+				sv.addErrorAt(child, "xs:all may contain only xs:element particles (XSD 1.0)")
+				continue
+			}
+			childMax := child.GetAttribute("maxOccurs")
+			if childMax != "" && string(childMax) != "0" && string(childMax) != "1" {
+				sv.addErrorAt(child, "elements within xs:all must have maxOccurs of 0 or 1 (XSD 1.0)")
+			}
+			childMin := child.GetAttribute("minOccurs")
+			if childMin != "" && string(childMin) != "0" && string(childMin) != "1" {
+				sv.addErrorAt(child, "elements within xs:all must have minOccurs of 0 or 1 (XSD 1.0)")
 			}
 		}
 	}
+}
+
+// groupDefinitionIsAll determines if a given xs:group reference (by QName string) resolves to a definition whose content model is xs:all
+func (sv *SchemaValidator) groupDefinitionIsAll(context xmldom.Element, ref string) bool {
+	// Resolve QName local part (simplification: use the part after ':', or full if no colon)
+	name := ref
+	if idx := strings.IndexByte(ref, ':'); idx != -1 {
+		name = ref[idx+1:]
+	}
+	// Climb to top-most element (schema root)
+	root := context
+	for {
+		p := root.ParentNode()
+		if p == nil { break }
+		if pe, ok := p.(xmldom.Element); ok {
+			root = pe
+			continue
+		}
+		break
+	}
+	// Find xs:group[@name=name]
+	children := root.Children()
+	for i := uint(0); i < children.Length(); i++ {
+		g := children.Item(i)
+		if g == nil || string(g.NamespaceURI()) != XSDNamespace || string(g.LocalName()) != "group" {
+			continue
+		}
+		if string(g.GetAttribute("name")) != name { continue }
+		// Inspect first model group child under this group
+		gc := g.Children()
+		for j := uint(0); j < gc.Length(); j++ {
+			c := gc.Item(j)
+			if c != nil && string(c.NamespaceURI()) == XSDNamespace {
+				if string(c.LocalName()) == "all" { return true }
+				if string(c.LocalName()) == "sequence" || string(c.LocalName()) == "choice" { return false }
+			}
+		}
+	}
+	return false
 }
 
 // validateGroup validates xs:group element
 func (sv *SchemaValidator) validateGroup(elem xmldom.Element) {
 	name := elem.GetAttribute("name")
 	ref := elem.GetAttribute("ref")
+
+	// Validate occurrence constraints on group particles (applies to references; defaults for definitions)
+	sv.validateOccurrences(elem)
 
 	// Either name or ref, but not both
 	if name != "" && ref != "" {
@@ -460,6 +570,13 @@ func (sv *SchemaValidator) validateGroup(elem xmldom.Element) {
 	if parent != nil && string(parent.LocalName()) == "schema" {
 		if name == "" && ref == "" {
 			sv.addErrorAt(elem, "global group must have a name attribute")
+		}
+	}
+
+	// Occurrence attributes are not permitted on named group definitions (only on references)
+	if name != "" {
+		if elem.HasAttribute("minOccurs") || elem.HasAttribute("maxOccurs") {
+			sv.addErrorAt(elem, "named xs:group definitions must not specify 'minOccurs' or 'maxOccurs'")
 		}
 	}
 

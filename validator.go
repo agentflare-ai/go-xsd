@@ -413,6 +413,10 @@ func (v *Validator) validateAttributes(elem xmldom.Element, elemType Type) {
 		if attrNS == "http://www.w3.org/2000/xmlns/" || attrNS == "xmlns" || attrLocal == "xmlns" {
 			continue
 		}
+		// Allow XSI attributes on any element per spec (xsi:type, xsi:nil, xsi:schemaLocation, xsi:noNamespaceSchemaLocation)
+		if attrNS == "http://www.w3.org/2001/XMLSchema-instance" {
+			continue
+		}
 
 		// Check if attribute is expected
 		if decl, ok := expected[attrLocal]; ok {

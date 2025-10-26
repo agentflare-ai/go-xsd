@@ -24,10 +24,13 @@ type Schema struct {
 	Imports            []*Import
 	ImportedSchemas    map[string]*Schema // Map of imported schemas by location
 	SubstitutionGroups map[QName][]QName  // Maps head element to list of substitutable elements
+	BlockDefault       map[string]bool    // xs:schema@blockDefault tokens
+	FinalDefault       map[string]bool    // xs:schema@finalDefault tokens
 	doc                xmldom.Document
-}
 
-// QName represents a qualified XML name
+	// Options
+	StrictContentModel bool // If true, use strict content-model validation
+}
 type QName struct {
 	Namespace string
 	Local     string
@@ -49,7 +52,8 @@ type ElementDecl struct {
 	MaxOcc            int // -1 for unbounded, renamed to avoid conflict
 	Nillable          bool
 	Abstract          bool
-	SubstitutionGroup QName // Head element this element can substitute for
+	SubstitutionGroup QName           // Head element this element can substitute for
+	Block             map[string]bool // Disallowed substitutions from @block
 	Default           string
 	Fixed             string
 	Constraints       []*IdentityConstraint // Identity constraints (key, keyref, unique)
@@ -72,13 +76,15 @@ type SimpleType struct {
 
 // ComplexType represents an XSD complex type
 type ComplexType struct {
-	QName          QName
-	Content        Content
-	Attributes     []*AttributeDecl
-	AttributeGroup []QName
-	AnyAttribute   *AnyAttribute
-	Mixed          bool
-	Abstract       bool
+	QName              QName
+	Content            Content
+	Attributes         []*AttributeDecl
+	AttributeGroup     []QName
+	AnyAttribute       *AnyAttribute
+	Mixed              bool
+	Abstract           bool
+	Final              map[string]bool // final constraints: extension, restriction
+	DerivedByExtension bool            // set true if this type (or its base chain) includes an extension
 }
 
 // Content represents element content model
@@ -182,8 +188,25 @@ type Restriction struct {
 }
 
 // Facet represents a constraining facet (deprecated - use FacetValidator from facets.go)
-type Facet interface {
-	Validate(value string) error
+ type Facet interface {
+ 	Validate(value string) error
+ }
+
+// parseDerivationSet parses tokens like "extension restriction substitution #all" into a set
+func parseDerivationSet(s string) map[string]bool {
+	set := make(map[string]bool)
+	for _, tok := range strings.Fields(s) {
+		set[tok] = true
+		if tok == "#all" {
+			// include common tokens
+			set["extension"] = true
+			set["restriction"] = true
+			set["substitution"] = true
+			set["list"] = true
+			set["union"] = true
+		}
+	}
+	return set
 }
 
 // List represents a list type
@@ -281,6 +304,14 @@ func Parse(doc xmldom.Document) (*Schema, error) {
 	// Get target namespace
 	if tns := root.GetAttribute("targetNamespace"); tns != "" {
 		schema.TargetNamespace = string(tns)
+	}
+
+// Parse schema-level defaults
+	if bd := root.GetAttribute("blockDefault"); bd != "" {
+		schema.BlockDefault = parseDerivationSet(string(bd))
+	}
+	if fd := root.GetAttribute("finalDefault"); fd != "" {
+		schema.FinalDefault = parseDerivationSet(string(fd))
 	}
 
 	// Parse schema components
@@ -477,8 +508,22 @@ func (s *Schema) isSubstitutableFor(actualElement, expectedElement QName) bool {
 
 	// Check if actualElement is in the substitution group of expectedElement
 	if members, exists := s.SubstitutionGroups[expectedElement]; exists {
-		for _, member := range members {
-			if member == actualElement {
+for _, member := range members {
+	if member == actualElement {
+				// Enforce head element block constraints
+if headDecl := s.ElementDecls[expectedElement]; headDecl != nil {
+					if headDecl.Block != nil {
+						if headDecl.Block["substitution"] || headDecl.Block["#all"] {
+return false
+						}
+					}
+					if s.BlockDefault != nil {
+						if s.BlockDefault["substitution"] || s.BlockDefault["#all"] {
+return false
+						}
+					}
+				}
+
 				// Verify type compatibility: substituting element's type must be derived from head element's type
 				actualDecl := s.ElementDecls[actualElement]
 				expectedDecl := s.ElementDecls[expectedElement]
@@ -488,17 +533,22 @@ func (s *Schema) isSubstitutableFor(actualElement, expectedElement QName) bool {
 					return true
 				}
 
+				// Enforce final constraints on head type (e.g. final="extension") before compatibility fallback
+				if headType, ok := expectedDecl.Type.(*ComplexType); ok {
+					if (headType.Final != nil && (headType.Final["extension"] || headType.Final["#all"])) || (s.FinalDefault != nil && (s.FinalDefault["extension"] || s.FinalDefault["#all"])) {
+if s.hasExtensionInDerivation(actualDecl.Type, expectedDecl.Type) {
+							return false
+						}
+					}
+				}
+
 				// Both declarations exist - check type compatibility
-				compatible := s.isTypeCompatible(actualDecl.Type, expectedDecl.Type)
+compatible := s.isTypeCompatible(actualDecl.Type, expectedDecl.Type)
 				if compatible {
 					return true
 				}
 
-				// Type compatibility check failed - this could be due to:
-				// 1. Types are genuinely incompatible (should reject)
-				// 2. TypeDefs lookup issue (implementation bug)
-				// For now, allow substitution if types exist (backward compatibility)
-				// TODO: Debug and fix isTypeCompatible to properly resolve base types
+				// Compatibility check failed - allow substitution if types exist (backward compatibility)
 				return actualDecl.Type != nil && expectedDecl.Type != nil
 			}
 		}
@@ -518,7 +568,70 @@ func (s *Schema) isSubstitutableFor(actualElement, expectedElement QName) bool {
 // Note: This function assumes the caller already holds a read lock on the schema
 func (s *Schema) isTypeCompatible(actualType, expectedType Type) bool {
 	visited := make(map[QName]bool, 8) // Pre-allocate for typical depth
-	return s.isTypeCompatibleWithCycleDetection(actualType, expectedType, visited)
+return s.isTypeCompatibleWithCycleDetection(actualType, expectedType, visited)
+}
+
+// hasExtensionInDerivation checks if deriving actualType from expectedType uses any extension step
+func (s *Schema) hasExtensionInDerivation(actualType, expectedType Type) bool {
+	visited := make(map[QName]bool, 8)
+	return s.hasExtensionWithCycleDetection(actualType, expectedType, visited)
+}
+
+func (s *Schema) hasExtensionWithCycleDetection(actualType, expectedType Type, visited map[QName]bool) bool {
+	if actualType == nil || expectedType == nil {
+		return false
+	}
+	if actualType.Name() == expectedType.Name() {
+		return false
+	}
+	if visited[actualType.Name()] {
+		return false
+	}
+	visited[actualType.Name()] = true
+
+	// Quick check: if the type was marked as derived by extension during resolution
+	if ct, ok := actualType.(*ComplexType); ok && ct.DerivedByExtension {
+		return true
+	}
+
+	switch actual := actualType.(type) {
+	case *ComplexType:
+		if actual.Content != nil {
+			if cc, ok := actual.Content.(*ComplexContent); ok {
+				if cc.Extension != nil && cc.Extension.Base.Local != "" {
+					// If base equals expected, we've used extension
+					if cc.Extension.Base == expectedType.Name() {
+						return true
+					}
+					if baseType := s.TypeDefs[cc.Extension.Base]; baseType != nil {
+						// Extension step occurred along the path
+						return true
+					}
+				}
+				if cc.Restriction != nil && cc.Restriction.Base.Local != "" {
+					if baseType := s.TypeDefs[cc.Restriction.Base]; baseType != nil {
+						return s.hasExtensionWithCycleDetection(baseType, expectedType, visited)
+					}
+				}
+			}
+			if sc, ok := actual.Content.(*SimpleContent); ok {
+				if sc.Extension != nil && sc.Extension.Base.Local != "" {
+					if sc.Extension.Base == expectedType.Name() {
+						return true
+					}
+					if baseType := s.TypeDefs[sc.Extension.Base]; baseType != nil {
+						return true
+					}
+				}
+				if sc.Restriction != nil && sc.Restriction.Base.Local != "" {
+					if baseType := s.TypeDefs[sc.Restriction.Base]; baseType != nil {
+						return s.hasExtensionWithCycleDetection(baseType, expectedType, visited)
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // isTypeCompatibleWithCycleDetection checks type compatibility with cycle detection
@@ -638,9 +751,13 @@ func (s *Schema) parseElementWithContext(elem xmldom.Element, isGlobal bool) err
 		decl.Abstract = true
 	}
 
-	// Parse substitutionGroup attribute
+// Parse substitutionGroup attribute
 	if substGroup := string(elem.GetAttribute("substitutionGroup")); substGroup != "" {
 		decl.SubstitutionGroup = s.parseQName(substGroup)
+	}
+	// Parse block attribute
+	if block := string(elem.GetAttribute("block")); block != "" {
+		decl.Block = parseDerivationSet(block)
 	}
 
 	decl.Default = string(elem.GetAttribute("default"))
@@ -847,12 +964,11 @@ func (s *Schema) parseSimpleType(elem xmldom.Element) error {
 
 // parseInlineComplexType parses an inline (anonymous) complex type definition
 func (s *Schema) parseInlineComplexType(elem xmldom.Element) *ComplexType {
-	ct := &ComplexType{
-		QName: QName{
-			Namespace: s.TargetNamespace,
-			Local:     "_anonymous",
-		},
-		Attributes: make([]*AttributeDecl, 0),
+ct := &ComplexType{
+		QName:              QName{Namespace: s.TargetNamespace, Local: "_anonymous"},
+		Attributes:         make([]*AttributeDecl, 0),
+		Final:              make(map[string]bool),
+		DerivedByExtension: false,
 	}
 
 	if mixed := string(elem.GetAttribute("mixed")); mixed == "true" {
@@ -861,6 +977,10 @@ func (s *Schema) parseInlineComplexType(elem xmldom.Element) *ComplexType {
 
 	if abstract := string(elem.GetAttribute("abstract")); abstract == "true" {
 		ct.Abstract = true
+	}
+	// Parse final attribute if present
+	if finalAttr := string(elem.GetAttribute("final")); finalAttr != "" {
+		ct.Final = parseDerivationSet(finalAttr)
 	}
 
 	// Parse content and attributes
@@ -921,12 +1041,11 @@ func (s *Schema) parseComplexType(elem xmldom.Element) error {
 		return nil // Anonymous type
 	}
 
-	ct := &ComplexType{
-		QName: QName{
-			Namespace: s.TargetNamespace,
-			Local:     name,
-		},
-		Attributes: make([]*AttributeDecl, 0),
+ct := &ComplexType{
+		QName:              QName{Namespace: s.TargetNamespace, Local: name},
+		Attributes:         make([]*AttributeDecl, 0),
+		Final:              make(map[string]bool),
+		DerivedByExtension: false,
 	}
 
 	if mixed := string(elem.GetAttribute("mixed")); mixed == "true" {
@@ -935,6 +1054,10 @@ func (s *Schema) parseComplexType(elem xmldom.Element) error {
 
 	if abstract := string(elem.GetAttribute("abstract")); abstract == "true" {
 		ct.Abstract = true
+	}
+	// Parse final attribute if present
+	if finalAttr := string(elem.GetAttribute("final")); finalAttr != "" {
+		ct.Final = parseDerivationSet(finalAttr)
 	}
 
 	// Parse content and attributes
@@ -1760,6 +1883,9 @@ func (s *Schema) resolveExtension(ct *ComplexType, ext *Extension) {
 			// Inherit attribute groups
 			ct.AttributeGroup = append(ct.AttributeGroup, baseCT.AttributeGroup...)
 
+			// Mark derivation by extension on this type and propagate from base
+			ct.DerivedByExtension = true || baseCT.DerivedByExtension
+
 			// Handle content model extension
 			if ext.Content != nil {
 				// Extension adds to base content
@@ -2023,18 +2149,158 @@ func (mg *ModelGroup) Validate(element xmldom.Element, schema *Schema) []Violati
 		}
 	}
 
-	switch mg.Kind {
-	case SequenceGroup:
+switch mg.Kind {
+case SequenceGroup:
+	if schema != nil && schema.StrictContentModel {
+		// If the entire sequence group is optional and there are no children, accept
+		if mg.MinOccurs() == 0 && len(childElements) == 0 {
+			return nil
+		}
+		violations = mg.validateSequenceStrict(childElements, schema)
+	} else {
 		violations = mg.validateSequence(childElements, schema)
-	case ChoiceGroup:
+	}
+case ChoiceGroup:
+	if schema != nil && schema.StrictContentModel {
+		violations = mg.validateChoiceStrict(childElements, schema)
+	} else {
 		violations = mg.validateChoice(childElements, schema)
-	case AllGroup:
+	}
+case AllGroup:
+	if schema != nil && schema.StrictContentModel {
+		violations = mg.validateAllStrict(childElements, schema)
+	} else {
 		violations = mg.validateAll(childElements, schema)
+	}
+}
+
+return violations
+}
+
+// Strict variants (initially delegate to existing implementations)
+func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *Schema) []Violation {
+	var violations []Violation
+	idx := 0
+	occ := 0
+	minG := mg.MinOccurs()
+	maxG := mg.MaxOccurs()
+
+	for maxG == -1 || occ < maxG {
+		c, ok := mg.matchSequenceOnce(mg, children[idx:], schema)
+		if !ok {
+			break
+		}
+		if c == 0 {
+			// Zero-length match counts as one occurrence to satisfy minOccurs, then stop
+			occ++
+			break
+		}
+		idx += c
+		occ++
+	}
+
+	if occ < minG {
+		violations = append(violations, Violation{Code: "cvc-complex-type.2.4.b", Message: fmt.Sprintf("Expected at least %d occurrence(s)", minG)})
+	}
+
+	for idx < len(children) {
+		violations = append(violations, Violation{Element: children[idx], Code: "cvc-complex-type.2.4.d", Message: fmt.Sprintf("Unexpected element '%s'", children[idx].LocalName())})
+		idx++
+	}
+	return violations
+}
+func (mg *ModelGroup) validateChoiceStrict(children []xmldom.Element, schema *Schema) []Violation {
+	var violations []Violation
+	i := 0
+	reps := 0
+	min := mg.MinOccurs()
+	max := mg.MaxOccurs()
+
+	for i < len(children) {
+		matchedAlt := false
+		for _, alt := range mg.Particles {
+			m, c, v := mg.matchParticle(alt, children[i:], schema)
+			if m > 0 && c > 0 {
+				violations = append(violations, v...)
+				i += c
+				reps++
+				matchedAlt = true
+				break
+			}
+		}
+		if !matchedAlt { break }
+		if max != -1 && reps >= max { break }
+	}
+
+	if reps < min {
+		violations = append(violations, Violation{Code: "cvc-complex-type.2.4.b", Message: fmt.Sprintf("Expected at least %d choice occurrence(s)", min)})
+	}
+	// leftover children are unexpected here
+	for i < len(children) {
+		violations = append(violations, Violation{Element: children[i], Code: "cvc-complex-type.2.4.d", Message: fmt.Sprintf("Unexpected element '%s'", children[i].LocalName())})
+		i++
+	}
+	return violations
+}
+func (mg *ModelGroup) validateAllStrict(children []xmldom.Element, schema *Schema) []Violation {
+	var violations []Violation
+
+	// Track occurrences per particle (index-based)
+	counts := make(map[int]int, len(mg.Particles))
+
+	// Helper to get maxOcc for particle (treat -1 as unbounded)
+	maxOcc := func(p Particle) int { return p.MaxOccurs() }
+
+	// Try to match each child to one unmatched/under-max particle
+	for _, child := range children {
+		matched := false
+		for i, particle := range mg.Particles {
+			// Enforce per-particle max
+			m := counts[i]
+			mx := maxOcc(particle)
+			if mx != -1 && m >= mx {
+				continue
+			}
+			if mg.elementMatchesParticle(child, particle, schema) {
+				counts[i] = m + 1
+				matched = true
+
+				// Validate matched child's type similarly to non-strict path
+				if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl && elemDecl.Type != nil {
+					violations = append(violations, elemDecl.Type.Validate(child, schema)...)
+				} else if elemRef, isElemRef := particle.(*ElementRef); isElemRef {
+					if decl, exists := schema.ElementDecls[elemRef.Ref]; exists && decl.Type != nil {
+						violations = append(violations, decl.Type.Validate(child, schema)...)
+					}
+				} else if wildcard, isWildcard := particle.(*AnyElement); isWildcard {
+					violations = append(violations, ValidateAnyElement(child, wildcard, schema)...)
+				}
+				break
+			}
+		}
+		if !matched {
+			violations = append(violations, Violation{
+				Element: child,
+				Code:    "cvc-complex-type.2.4.d",
+				Message: fmt.Sprintf("Unexpected element '%s'", child.LocalName()),
+			})
+		}
+	}
+
+	// Enforce per-particle minOccurs
+	for i, particle := range mg.Particles {
+		if counts[i] < particle.MinOccurs() {
+			violations = append(violations, Violation{
+				Code:    "cvc-complex-type.2.4.a",
+				Message: "Required element missing in 'all' group",
+			})
+		}
 	}
 
 	return violations
 }
 
+// Existing non-strict implementation
 func (mg *ModelGroup) validateSequence(children []xmldom.Element, schema *Schema) []Violation {
 	var violations []Violation
 	childIndex := 0
@@ -2562,32 +2828,30 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 
 	// Handle nested ModelGroups specially
 	if nestedGroup, isModelGroup := particle.(*ModelGroup); isModelGroup {
-		switch nestedGroup.Kind {
-		case ChoiceGroup:
-			// For a choice group, match consecutive children against any particle in the choice
-			consumed, nestedViolations := mg.matchChoiceGroup(nestedGroup, children, schema)
-			matched = consumed // Each consumed child is one match
-			violations = append(violations, nestedViolations...)
-			return matched, consumed, violations
-		case SequenceGroup:
-			// For a sequence group, recursively validate and count consumed
-			nestedViolations := nestedGroup.validateSequence(children, schema)
-			violations = append(violations, nestedViolations...)
-			consumed = mg.countConsumedByGroup(nestedGroup, children, schema)
-			if consumed > 0 {
-				matched = 1 // The group matched once (consumed multiple children)
+		minG := nestedGroup.MinOccurs()
+		maxG := nestedGroup.MaxOccurs()
+		occ := 0
+		offset := 0
+for maxG == -1 || occ < maxG {
+			if offset >= len(children) { break }
+			c, ok := mg.matchGroupOnce(nestedGroup, children[offset:], schema)
+			if !ok {
+				break
 			}
-			return matched, consumed, violations
-		case AllGroup:
-			// For an all group, validate and count consumed
-			nestedViolations := nestedGroup.validateAll(children, schema)
-			violations = append(violations, nestedViolations...)
-			consumed = mg.countConsumedByGroup(nestedGroup, children, schema)
-			if consumed > 0 {
-				matched = 1
+			if c == 0 {
+				// Zero-length match (all children optional/prohibited) counts as one occurrence; avoid infinite loop
+				occ++
+				break
 			}
-			return matched, consumed, violations
+			occ++
+			offset += c
 		}
+		matched = occ
+		consumed = offset
+		if matched < minG {
+			violations = append(violations, Violation{ Code: "cvc-complex-type.2.4.b", Message: "Required group missing" })
+		}
+		return matched, consumed, violations
 	}
 
 	// Handle inline ElementDecl specially - it can match and validate
@@ -2638,6 +2902,48 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 		return matched, consumed, violations
 	}
 
+	// Handle ElementRef explicitly to both match and validate types/defaults
+	if elemRef, isElemRef := particle.(*ElementRef); isElemRef {
+		for i := 0; i < len(children); i++ {
+			child := children[i]
+			if mg.elementMatchesParticle(child, elemRef, schema) {
+				matched++
+				consumed++
+
+				// Determine actual declaration: prefer child's own global decl (handles substitution), fallback to referenced decl
+				actualQName := QName{Namespace: string(child.NamespaceURI()), Local: string(child.LocalName())}
+				declToValidate, exists := schema.ElementDecls[actualQName]
+				if !exists && actualQName.Namespace == "" {
+					// Try with target namespace when instance has no namespace
+					actualQName.Namespace = schema.TargetNamespace
+					declToValidate, exists = schema.ElementDecls[actualQName]
+				}
+				if !exists {
+					// Fallback to referenced declaration
+					declToValidate = schema.ElementDecls[elemRef.Ref]
+				}
+
+				if declToValidate != nil {
+					// Validate fixed/default
+					violations = append(violations, ValidateElementFixedDefault(child, declToValidate)...)
+					// Validate type
+					if declToValidate.Type != nil {
+						violations = append(violations, declToValidate.Type.Validate(child, schema)...)
+					}
+				}
+
+				// Enforce maxOccurs
+				mx := elemRef.MaxOcc
+				if mx != -1 && matched >= mx {
+					break
+				}
+			} else {
+				break
+			}
+		}
+		return matched, consumed, violations
+	}
+
 	// Count how many children match this particle
 	for i := 0; i < len(children); i++ {
 		if mg.elementMatchesParticle(children[i], particle, schema) {
@@ -2651,7 +2957,107 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 			break // Stop at first non-match for sequence
 		}
 	}
-	return
+return
+}
+
+// matchGroupOnce tries to match exactly one occurrence of a nested group against the head of children.
+// It returns the number of consumed children and whether the match was successful.
+func (mg *ModelGroup) matchGroupOnce(group *ModelGroup, children []xmldom.Element, schema *Schema) (consumed int, ok bool) {
+	switch group.Kind {
+	case SequenceGroup:
+		return mg.matchSequenceOnce(group, children, schema)
+	case AllGroup:
+		return mg.matchAllOnce(group, children, schema)
+	case ChoiceGroup:
+		return mg.matchChoiceOnce(group, children, schema)
+	}
+	return 0, false
+}
+
+// matchSequenceOnce matches one occurrence of a sequence group
+func (mg *ModelGroup) matchSequenceOnce(group *ModelGroup, children []xmldom.Element, schema *Schema) (consumed int, ok bool) {
+	idx := 0
+	allOptional := true
+	for _, p := range group.Particles {
+		min := p.MinOccurs()
+		max := p.MaxOccurs()
+		if min > 0 { allOptional = false }
+		count := 0
+		for (max == -1 || count < max) && idx < len(children) {
+			m, c, _ := mg.matchParticle(p, children[idx:], schema)
+			if m == 0 || c == 0 {
+				break
+			}
+			count += m
+			idx += c
+		}
+		if count < min {
+			return 0, false
+		}
+	}
+	if idx == 0 && allOptional {
+		return 0, true
+	}
+	if idx == 0 {
+		return 0, false
+	}
+	return idx, true
+}
+
+// matchAllOnce matches one occurrence of an all group
+func (mg *ModelGroup) matchAllOnce(group *ModelGroup, children []xmldom.Element, schema *Schema) (consumed int, ok bool) {
+	matched := make(map[int]int, len(group.Particles))
+	used := make([]bool, len(children))
+	progress := true
+	for progress {
+		progress = false
+		for i, p := range group.Particles {
+			if p.MaxOccurs() != -1 && matched[i] >= p.MaxOccurs() {
+				continue
+			}
+			// find next child not used that matches p
+			for ci := 0; ci < len(children); ci++ {
+				if used[ci] { continue }
+				if mg.elementMatchesParticle(children[ci], p, schema) {
+					used[ci] = true
+					matched[i]++
+					consumed++
+					progress = true
+					break
+				}
+			}
+		}
+	}
+	// enforce mins
+	allMinZero := true
+	for i, p := range group.Particles {
+		if p.MinOccurs() > 0 { allMinZero = false }
+		if matched[i] < p.MinOccurs() {
+			return 0, false
+		}
+	}
+	if consumed == 0 && allMinZero {
+		return 0, true
+	}
+	if consumed == 0 {
+		return 0, false
+	}
+	return consumed, true
+}
+
+// matchChoiceOnce matches one occurrence of a choice group (choose one alternative)
+func (mg *ModelGroup) matchChoiceOnce(group *ModelGroup, children []xmldom.Element, schema *Schema) (consumed int, ok bool) {
+	best := 0
+	for _, alt := range group.Particles {
+		m, c, _ := mg.matchParticle(alt, children, schema)
+		if m >= alt.MinOccurs() && c > 0 {
+			if c > best { best = c }
+		}
+	}
+	if best == 0 {
+		return 0, false
+	}
+	return best, true
 }
 
 // matchWildcard matches elements against a wildcard
@@ -2689,7 +3095,7 @@ func (mg *ModelGroup) matchWildcard(wildcard *AnyElement, children []xmldom.Elem
 
 func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Particle, schema *Schema) bool {
 	switch p := particle.(type) {
-	case *ElementDecl:
+case *ElementDecl:
 		// Inline element declaration - check if element matches
 		elemQName := QName{
 			Namespace: string(elem.NamespaceURI()),
@@ -2699,9 +3105,19 @@ func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Parti
 		if elemQName == p.Name {
 			return true
 		}
+		// Try with target namespace if element has no namespace
+		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
+			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
+			if testQName == p.Name {
+				return true
+			}
+			if schema.isSubstitutableFor(testQName, p.Name) {
+				return true
+			}
+		}
 		// Check substitution groups - can this element substitute for the expected element?
 		return schema.isSubstitutableFor(elemQName, p.Name)
-	case *ElementRef:
+case *ElementRef:
 		// Check if element matches the reference
 		elemQName := QName{
 			Namespace: string(elem.NamespaceURI()),
@@ -2711,6 +3127,16 @@ func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Parti
 		if elemQName == p.Ref {
 			return true
 		}
+		// Try with target namespace if element has no namespace
+		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
+			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
+			if testQName == p.Ref {
+				return true
+			}
+			if schema.isSubstitutableFor(testQName, p.Ref) {
+				return true
+			}
+		}
 		// Check substitution groups
 		return schema.isSubstitutableFor(elemQName, p.Ref)
 	case *GroupRef:
@@ -2719,9 +3145,6 @@ func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Parti
 			violations := group.Validate(elem, schema)
 			return len(violations) == 0
 		}
-	case *AnyElement:
-		// Check if element matches the wildcard's namespace constraint
-		return MatchesWildcard(elem, p.Namespace, schema.TargetNamespace)
 	case *ModelGroup:
 		// For a nested group in a choice, recursively check if element matches any particle in the group
 		// Don't just validate, because optional particles validate successfully even when not matching
