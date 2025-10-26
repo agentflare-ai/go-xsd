@@ -50,25 +50,26 @@ func (c *WildcardNamespaceConstraint) Matches(namespace, targetNamespace string)
 	case "##any":
 		return true
 	case "##other":
-		return namespace != targetNamespace
+		// Any namespace other than the target namespace; excludes no-namespace
+		return namespace != "" && namespace != targetNamespace
 	case "##targetNamespace":
 		return namespace == targetNamespace
 	case "##local":
 		return namespace == ""
 	case "list":
-		// Check explicit namespace list
+		// Check explicit namespace list, including special tokens
 		for _, ns := range c.Namespaces {
-			if ns == namespace {
+			switch ns {
+			case namespace:
 				return true
-			}
-		}
-		// Also check for ##targetNamespace or ##local in the list
-		for _, ns := range c.Namespaces {
-			if ns == "##targetNamespace" && namespace == targetNamespace {
+			case "##any":
 				return true
-			}
-			if ns == "##local" && namespace == "" {
-				return true
+			case "##other":
+				if namespace != "" && namespace != targetNamespace { return true }
+			case "##targetNamespace":
+				if namespace == targetNamespace { return true }
+			case "##local":
+				if namespace == "" { return true }
 			}
 		}
 		return false

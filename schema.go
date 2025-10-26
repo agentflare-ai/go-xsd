@@ -3,6 +3,7 @@ package xsd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,8 @@ type Schema struct {
 	SubstitutionGroups map[QName][]QName  // Maps head element to list of substitutable elements
 	BlockDefault       map[string]bool    // xs:schema@blockDefault tokens
 	FinalDefault       map[string]bool    // xs:schema@finalDefault tokens
+	ElementFormDefault    string          // "qualified" or "unqualified" (default)
+	AttributeFormDefault  string          // "qualified" or "unqualified" (default)
 	doc                xmldom.Document
 
 	// Options
@@ -265,14 +268,27 @@ func LoadSchema(filename string) (*Schema, error) {
 		return nil, fmt.Errorf("failed to parse XML file: %w", err)
 	}
 
-	// Validate the schema document itself
+	// Validate the schema document itself (basic structural checks)
 	sv := NewSchemaValidator()
 	if errors := sv.ValidateSchema(doc); len(errors) > 0 {
 		// Return the first validation error
 		return nil, fmt.Errorf("invalid XSD schema: %w", errors[0])
 	}
 
-	return Parse(doc)
+// Use SchemaLoader to load schema with imports/includes
+	baseDir := filepath.Dir(filename)
+	loader := NewSchemaLoaderSimple(baseDir)
+	combined, err := loader.LoadSchemaWithImports(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	// Perform compiled content model determinism checks (UPA)
+	if err := combined.ValidateContentModels(); err != nil {
+		return nil, fmt.Errorf("invalid XSD schema: %w", err)
+	}
+
+	return combined, nil
 }
 
 // Parse parses an XSD schema from an XML document
@@ -301,10 +317,10 @@ func Parse(doc xmldom.Document) (*Schema, error) {
 		doc:                doc,
 	}
 
-	// Get target namespace
-	if tns := root.GetAttribute("targetNamespace"); tns != "" {
-		schema.TargetNamespace = string(tns)
-	}
+// Get target namespace
+if tns := root.GetAttribute("targetNamespace"); tns != "" {
+	schema.TargetNamespace = string(tns)
+}
 
 // Parse schema-level defaults
 	if bd := root.GetAttribute("blockDefault"); bd != "" {
@@ -312,6 +328,17 @@ func Parse(doc xmldom.Document) (*Schema, error) {
 	}
 	if fd := root.GetAttribute("finalDefault"); fd != "" {
 		schema.FinalDefault = parseDerivationSet(string(fd))
+	}
+	// Parse form defaults (defaults are 'unqualified')
+	if efd := root.GetAttribute("elementFormDefault"); efd != "" {
+		schema.ElementFormDefault = string(efd)
+	} else {
+		schema.ElementFormDefault = "unqualified"
+	}
+	if afd := root.GetAttribute("attributeFormDefault"); afd != "" {
+		schema.AttributeFormDefault = string(afd)
+	} else {
+		schema.AttributeFormDefault = "unqualified"
 	}
 
 	// Parse schema components
@@ -822,9 +849,24 @@ func (s *Schema) parseInlineElement(elem xmldom.Element) *ElementDecl {
 		return nil
 	}
 
+	// Determine namespace based on form attribute or elementFormDefault
+	form := string(elem.GetAttribute("form"))
+	ns := ""
+	if form == "qualified" {
+		ns = s.TargetNamespace
+	} else if form == "unqualified" {
+		ns = ""
+	} else {
+		if s.ElementFormDefault == "qualified" {
+			ns = s.TargetNamespace
+		} else {
+			ns = ""
+		}
+	}
+
 	decl := &ElementDecl{
 		Name: QName{
-			Namespace: s.TargetNamespace,
+			Namespace: ns,
 			Local:     name,
 		},
 		MinOcc:      s.parseOccurs(elem, "minOccurs", 1),
@@ -1435,9 +1477,37 @@ func (s *Schema) parseAttribute(elem xmldom.Element) *AttributeDecl {
 		return nil // Could be a reference
 	}
 
+	// Determine if global or local by inspecting parent
+	parent := elem.ParentNode()
+	isGlobal := false
+	if parent != nil {
+		if pe, ok := parent.(xmldom.Element); ok {
+			if string(pe.LocalName()) == "schema" {
+				isGlobal = true
+			}
+		}
+	}
+
+	// Determine namespace based on form/defaults
+	ns := ""
+	if isGlobal {
+		ns = s.TargetNamespace
+	} else {
+		form := string(elem.GetAttribute("form"))
+		if form == "qualified" {
+			ns = s.TargetNamespace
+		} else if form == "unqualified" || form == "" {
+			if s.AttributeFormDefault == "qualified" {
+				ns = s.TargetNamespace
+			} else {
+				ns = ""
+			}
+		}
+	}
+
 	attr := &AttributeDecl{
 		Name: QName{
-			Namespace: s.TargetNamespace,
+			Namespace: ns,
 			Local:     name,
 		},
 		Use: OptionalUse,
@@ -1786,6 +1856,10 @@ func (s *Schema) resolveTypesInComplexType(ct *ComplexType) {
 
 // resolveInlineElementTypes resolves placeholder types for inline ElementDecl particles
 func (s *Schema) resolveInlineElementTypes(particles []Particle) {
+	s.resolveInlineElementTypesEx(particles, make(map[*ModelGroup]bool))
+}
+
+func (s *Schema) resolveInlineElementTypesEx(particles []Particle, visited map[*ModelGroup]bool) {
 	for _, p := range particles {
 		switch pt := p.(type) {
 		case *ElementDecl:
@@ -1805,40 +1879,48 @@ func (s *Schema) resolveInlineElementTypes(particles []Particle) {
 				}
 			}
 		case *ModelGroup:
+			if visited[pt] { continue }
+			visited[pt] = true
 			// Recursively resolve nested model groups
-			s.resolveInlineElementTypes(pt.Particles)
+			s.resolveInlineElementTypesEx(pt.Particles, visited)
+			delete(visited, pt)
 		}
 	}
 }
 
 // resolveParticles recursively resolves GroupRef particles with cycle detection
 func (s *Schema) resolveParticles(particles []Particle) []Particle {
-	return s.resolveParticlesWithVisited(particles, make(map[QName]bool))
+	return s.resolveParticlesWithVisitedEx(particles, make(map[QName]bool), make(map[*ModelGroup]bool))
 }
 
-// resolveParticlesWithVisited recursively resolves GroupRef particles with cycle detection
-func (s *Schema) resolveParticlesWithVisited(particles []Particle, visited map[QName]bool) []Particle {
+// resolveParticlesWithVisited recursively resolves GroupRef particles with cycle detection (backward compat)
+func (s *Schema) resolveParticlesWithVisited(particles []Particle, visitedRefs map[QName]bool) []Particle {
+	return s.resolveParticlesWithVisitedEx(particles, visitedRefs, make(map[*ModelGroup]bool))
+}
+
+// resolveParticlesWithVisitedEx resolves particles guarding both GroupRef (QName) and ModelGroup pointer cycles
+func (s *Schema) resolveParticlesWithVisitedEx(particles []Particle, visitedRefs map[QName]bool, visitedGroups map[*ModelGroup]bool) []Particle {
 	var resolved []Particle
 
 	for _, p := range particles {
 		switch pt := p.(type) {
 		case *GroupRef:
-			// Check for cycles
-			if visited[pt.Ref] {
+			// Check for cycles via group references
+			if visitedRefs[pt.Ref] {
 				// Cycle detected - keep the unresolved reference
 				resolved = append(resolved, pt)
 				continue
 			}
 
 			// Mark as visited
-			visited[pt.Ref] = true
+			visitedRefs[pt.Ref] = true
 
 			// Resolve group reference
 			if group, exists := s.Groups[pt.Ref]; exists {
 				// Inline the group's particles
 				resolvedGroup := &ModelGroup{
 					Kind:      group.Kind,
-					Particles: s.resolveParticlesWithVisited(group.Particles, visited), // Recursive resolution with visited tracking
+					Particles: s.resolveParticlesWithVisitedEx(group.Particles, visitedRefs, visitedGroups), // Recursive resolution with visited tracking
 					MinOcc:    pt.MinOcc,
 					MaxOcc:    pt.MaxOcc,
 				}
@@ -1853,12 +1935,18 @@ func (s *Schema) resolveParticlesWithVisited(particles []Particle, visited map[Q
 			}
 
 			// Unmark as visited when done (to allow reuse in other branches)
-			delete(visited, pt.Ref)
+			delete(visitedRefs, pt.Ref)
 
 		case *ModelGroup:
-			// Recursively resolve nested groups
-			pt.Particles = s.resolveParticlesWithVisited(pt.Particles, visited)
+			// Guard against pointer cycles in nested model groups
+			if visitedGroups[pt] {
+				resolved = append(resolved, pt)
+				continue
+			}
+			visitedGroups[pt] = true
+			pt.Particles = s.resolveParticlesWithVisitedEx(pt.Particles, visitedRefs, visitedGroups)
 			resolved = append(resolved, pt)
+			delete(visitedGroups, pt)
 		default:
 			// ElementRef, AnyElement, etc. - keep as is
 			resolved = append(resolved, p)
@@ -2185,24 +2273,88 @@ func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *
 	minG := mg.MinOccurs()
 	maxG := mg.MaxOccurs()
 
+	// If the entire sequence group is optional and there are no children, accept
+	if minG == 0 && len(children) == 0 {
+		return nil
+	}
+
 	for maxG == -1 || occ < maxG {
-		c, ok := mg.matchSequenceOnce(mg, children[idx:], schema)
-		if !ok {
-			break
+		startIdx := idx
+		matchedAll := true
+		allOptional := true
+
+		for pi := 0; pi < len(mg.Particles); pi++ {
+			p := mg.Particles[pi]
+			var next Particle
+			if pi+1 < len(mg.Particles) { next = mg.Particles[pi+1] }
+
+			minP := p.MinOccurs()
+			maxP := p.MaxOccurs()
+			if minP > 0 { allOptional = false }
+			count := 0
+
+			// Special handling for wildcard in sequences: be conservative to avoid over-greedy consumption
+			if ae, ok := p.(*AnyElement); ok {
+				for (ae.MaxOccurs() == -1 || count < ae.MaxOccurs()) && idx < len(children) {
+					// If the next particle is present and the next child matches it, stop consuming wildcard
+					if next != nil && mg.elementMatchesParticle(children[idx], next, schema) {
+						break
+					}
+					// Otherwise consume one wildcard element
+					violations = append(violations, ValidateAnyElement(children[idx], ae, schema)...)
+					count++
+					idx++
+				}
+			} else if choiceGrp, ok := p.(*ModelGroup); ok && choiceGrp.Kind == ChoiceGroup {
+				for (maxP == -1 || count < maxP) && idx < len(children) {
+					c, v := mg.matchChoiceWithLookahead(choiceGrp, children[idx:], next, schema)
+					if c == 0 {
+						break
+					}
+					violations = append(violations, v...)
+					count++
+					idx += c
+				}
+			} else {
+				for (maxP == -1 || count < maxP) && idx < len(children) {
+					m, c, pv := mg.matchParticle(p, children[idx:], schema)
+					if m == 0 || c == 0 {
+						break
+					}
+					// Only append violations when we actually consume children
+					if c > 0 {
+						violations = append(violations, pv...)
+					}
+					count += m
+					idx += c
+				}
+			}
+
+			if count < minP {
+				matchedAll = false
+				break
+			}
 		}
-		if c == 0 {
-			// Zero-length match counts as one occurrence to satisfy minOccurs, then stop
+
+		if matchedAll {
 			occ++
-			break
+			// Zero-length occurrence: prevent infinite loop (when all particles optional)
+			if idx == startIdx || allOptional {
+				break
+			}
+			continue
 		}
-		idx += c
-		occ++
+
+		// Revert consumption for the failed occurrence and stop
+		idx = startIdx
+		break
 	}
 
 	if occ < minG {
 		violations = append(violations, Violation{Code: "cvc-complex-type.2.4.b", Message: fmt.Sprintf("Expected at least %d occurrence(s)", minG)})
 	}
 
+	// Any remaining children are unexpected
 	for idx < len(children) {
 		violations = append(violations, Violation{Element: children[idx], Code: "cvc-complex-type.2.4.d", Message: fmt.Sprintf("Unexpected element '%s'", children[idx].LocalName())})
 		idx++
@@ -2216,20 +2368,36 @@ func (mg *ModelGroup) validateChoiceStrict(children []xmldom.Element, schema *Sc
 	min := mg.MinOccurs()
 	max := mg.MaxOccurs()
 
+	// If entire choice is optional and no children, accept
+	if min == 0 && len(children) == 0 {
+		return nil
+	}
+
 	for i < len(children) {
-		matchedAlt := false
+		bestConsumed := 0
+		var bestViolations []Violation
+
 		for _, alt := range mg.Particles {
 			m, c, v := mg.matchParticle(alt, children[i:], schema)
-			if m > 0 && c > 0 {
-				violations = append(violations, v...)
-				i += c
-				reps++
-				matchedAlt = true
-				break
+			if m >= alt.MinOccurs() && c > 0 {
+				// Pick the alternative that consumes the most children
+				if c > bestConsumed {
+					bestConsumed = c
+					bestViolations = v
+				}
 			}
 		}
-		if !matchedAlt { break }
-		if max != -1 && reps >= max { break }
+
+		if bestConsumed == 0 {
+			break
+		}
+
+		violations = append(violations, bestViolations...)
+		i += bestConsumed
+		reps++
+		if max != -1 && reps >= max {
+			break
+		}
 	}
 
 	if reps < min {
@@ -2832,7 +3000,7 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 		maxG := nestedGroup.MaxOccurs()
 		occ := 0
 		offset := 0
-for maxG == -1 || occ < maxG {
+		for maxG == -1 || occ < maxG {
 			if offset >= len(children) { break }
 			c, ok := mg.matchGroupOnce(nestedGroup, children[offset:], schema)
 			if !ok {
@@ -2845,6 +3013,41 @@ for maxG == -1 || occ < maxG {
 			}
 			occ++
 			offset += c
+		}
+		matched = occ
+		consumed = offset
+		if matched < minG {
+			violations = append(violations, Violation{ Code: "cvc-complex-type.2.4.b", Message: "Required group missing" })
+		}
+		return matched, consumed, violations
+	}
+
+	// Handle GroupRef similarly to nested model groups
+	if gr, isGroupRef := particle.(*GroupRef); isGroupRef {
+		// Resolve group reference
+		schema.mu.RLock()
+		group, exists := schema.Groups[gr.Ref]
+		schema.mu.RUnlock()
+		if !exists {
+			return 0, 0, []Violation{{ Code: "xsd-group-not-found", Message: fmt.Sprintf("Group reference '%s' not found", gr.Ref) }}
+		}
+		// Use group's structure with occurrences from the reference
+		minG := gr.MinOcc
+		maxG := gr.MaxOcc
+		occ := 0
+		offset := 0
+		for maxG == -1 || occ < maxG {
+			if offset >= len(children) { break }
+			c, ok := mg.matchGroupOnce(group, children[offset:], schema)
+			if !ok {
+				break
+			}
+			if c == 0 {
+				occ++
+				break
+			}
+			offset += c
+			occ++
 		}
 		matched = occ
 		consumed = offset
@@ -3093,6 +3296,39 @@ func (mg *ModelGroup) matchWildcard(wildcard *AnyElement, children []xmldom.Elem
 	return matched, consumed, violations
 }
 
+func (mg *ModelGroup) matchChoiceWithLookahead(choiceGroup *ModelGroup, children []xmldom.Element, next Particle, schema *Schema) (consumed int, violations []Violation) {
+	bestConsumed := 0
+	var bestViolations []Violation
+	// First pass: prefer alts that allow the following required particle to match
+	for _, alt := range choiceGroup.Particles {
+	_, c, v := mg.matchParticle(alt, children, schema)
+		if c == 0 { continue }
+		// If next is required, check that it can match after this alt
+		nextRequired := next != nil && next.MinOccurs() > 0
+		if nextRequired {
+			if c < len(children) {
+				if mg.elementMatchesParticle(children[c], next, schema) {
+					if c > bestConsumed { bestConsumed = c; bestViolations = v }
+				}
+			} else {
+				// If no more children after alt but next is required, skip this alt
+				continue
+			}
+		} else {
+			// Next optional or absent - accept
+			if c > bestConsumed { bestConsumed = c; bestViolations = v }
+		}
+	}
+	if bestConsumed == 0 {
+		// Fallback: pick longest alt regardless of next
+		for _, alt := range choiceGroup.Particles {
+			_, c, v := mg.matchParticle(alt, children, schema)
+			if c > bestConsumed { bestConsumed = c; bestViolations = v }
+		}
+	}
+	return bestConsumed, bestViolations
+}
+
 func (mg *ModelGroup) elementMatchesParticle(elem xmldom.Element, particle Particle, schema *Schema) bool {
 	switch p := particle.(type) {
 case *ElementDecl:
@@ -3104,16 +3340,6 @@ case *ElementDecl:
 		// Direct match
 		if elemQName == p.Name {
 			return true
-		}
-		// Try with target namespace if element has no namespace
-		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
-			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
-			if testQName == p.Name {
-				return true
-			}
-			if schema.isSubstitutableFor(testQName, p.Name) {
-				return true
-			}
 		}
 		// Check substitution groups - can this element substitute for the expected element?
 		return schema.isSubstitutableFor(elemQName, p.Name)
@@ -3127,37 +3353,19 @@ case *ElementRef:
 		if elemQName == p.Ref {
 			return true
 		}
-		// Try with target namespace if element has no namespace
-		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
-			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
-			if testQName == p.Ref {
-				return true
-			}
-			if schema.isSubstitutableFor(testQName, p.Ref) {
-				return true
-			}
-		}
 		// Check substitution groups
 		return schema.isSubstitutableFor(elemQName, p.Ref)
-	case *GroupRef:
-		// Resolve and check group
+case *GroupRef:
+		// Resolve and check if this element falls in the group's FIRST set
 		if group, exists := schema.Groups[p.Ref]; exists {
-			violations := group.Validate(elem, schema)
-			return len(violations) == 0
+			return schema.elementInFirstSet(elem, group)
 		}
-	case *ModelGroup:
-		// For a nested group in a choice, recursively check if element matches any particle in the group
-		// Don't just validate, because optional particles validate successfully even when not matching
-		var checkGroupMatch func(*ModelGroup) bool
-		checkGroupMatch = func(group *ModelGroup) bool {
-			for _, gp := range group.Particles {
-				if mg.elementMatchesParticle(elem, gp, schema) {
-					return true
-				}
-			}
-			return false
-		}
-		return checkGroupMatch(p)
+case *ModelGroup:
+		// Check using FIRST set of the nested group
+		return schema.elementInFirstSet(elem, p)
+	case *AnyElement:
+		// Check namespace constraint only for matching predicate; detailed validation is handled elsewhere
+		return MatchesWildcard(elem, p.Namespace, schema.TargetNamespace)
 	}
 	return false
 }
@@ -3185,4 +3393,274 @@ func (cc *ComplexContent) Validate(element xmldom.Element, schema *Schema) []Vio
 func (a *AllowAnyContent) Validate(element xmldom.Element, schema *Schema) []Violation {
 	// Allow any children - don't report violations for content model
 	return nil
+}
+
+// ValidateContentModels performs determinism (UPA) checks on compiled content models
+func (s *Schema) ValidateContentModels() error {
+	visited := make(map[*ModelGroup]bool)
+	visitedRefs := make(map[QName]bool)
+	// Check complex types
+	for _, t := range s.TypeDefs {
+		if ct, ok := t.(*ComplexType); ok {
+			if mg, ok := ct.Content.(*ModelGroup); ok {
+				if err := s.validateGroupUPAWithVisited(mg, visited, visitedRefs); err != nil {
+					return err
+				}
+			}
+			if cc, ok := ct.Content.(*ComplexContent); ok {
+				var content Content
+				if cc.Extension != nil { content = cc.Extension.Content }
+				if cc.Restriction != nil { content = cc.Restriction.Content }
+				if mg, ok := content.(*ModelGroup); ok {
+					if err := s.validateGroupUPAWithVisited(mg, visited, visitedRefs); err != nil { return err }
+				}
+			}
+		}
+	}
+	// Check named groups
+	for _, g := range s.Groups {
+		if err := s.validateGroupUPAWithVisited(g, visited, visitedRefs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type firstSet struct {
+	names map[QName]bool
+	wildcards []*WildcardNamespaceConstraint
+}
+
+func (fs *firstSet) addName(q QName) {
+	if fs.names == nil { fs.names = make(map[QName]bool) }
+	fs.names[q] = true
+}
+
+func (fs *firstSet) addWildcard(ns string) {
+	wc := ParseNamespaceConstraint(ns)
+	fs.wildcards = append(fs.wildcards, wc)
+}
+
+func (s *Schema) validateGroupUPAWithVisited(mg *ModelGroup, visited map[*ModelGroup]bool, visitedRefs map[QName]bool) error {
+	if visited[mg] { return nil }
+	visited[mg] = true
+	// Recurse into nested groups first
+	for _, p := range mg.Particles {
+		if ng, ok := p.(*ModelGroup); ok {
+			if err := s.validateGroupUPAWithVisited(ng, visited, visitedRefs); err != nil { return err }
+		}
+		if gr, ok := p.(*GroupRef); ok {
+			if visitedRefs[gr.Ref] { continue }
+			visitedRefs[gr.Ref] = true
+			s.mu.RLock(); g := s.Groups[gr.Ref]; s.mu.RUnlock()
+			if g != nil { if err := s.validateGroupUPAWithVisited(g, visited, visitedRefs); err != nil { return err } }
+			delete(visitedRefs, gr.Ref)
+		}
+	}
+	// Enforce determinism
+	switch mg.Kind {
+	case ChoiceGroup:
+		// Build first sets for direct particles
+		sets := make([]*firstSet, len(mg.Particles))
+		for i, p := range mg.Particles {
+			sets[i] = s.buildFirstSet(p, make(map[*ModelGroup]bool), make(map[QName]bool))
+		}
+		// Pairwise overlap check
+		for i := 0; i < len(sets); i++ {
+			for j := i+1; j < len(sets); j++ {
+				if s.firstSetsOverlap(sets[i], sets[j]) {
+					return fmt.Errorf("content model is not determinisitic (UPA): overlapping choice alternatives")
+				}
+			}
+		}
+	case SequenceGroup:
+		// For sequences, if a particle can be absent (nullable), its FIRST set must not overlap with
+		// the FIRST set of any particle that can follow via a chain of nullable particles.
+		// Compute FIRST for each particle once
+		firsts := make([]*firstSet, len(mg.Particles))
+		for i, p := range mg.Particles {
+			firsts[i] = s.buildFirstSet(p, make(map[*ModelGroup]bool), make(map[QName]bool))
+		}
+		// Helper to check nullability of a particle
+		isNull := func(p Particle) bool { return s.isNullable(p) }
+		for i := 0; i < len(mg.Particles); i++ {
+			// Only relevant when p_i is nullable
+			if !isNull(mg.Particles[i]) { continue }
+			// Build suffix FIRST reachable by skipping p_i and subsequent nullable particles
+			suffixFirst := &firstSet{names: make(map[QName]bool)}
+			for j := i+1; j < len(mg.Particles); j++ {
+				// Union FIRST of p_j into suffixFirst
+				for q := range firsts[j].names { suffixFirst.names[q] = true }
+				suffixFirst.wildcards = append(suffixFirst.wildcards, firsts[j].wildcards...)
+				// If current p_j is not nullable, stop
+				if !isNull(mg.Particles[j]) { break }
+			}
+			// Check overlap between FIRST(p_i) and suffixFirst
+			if s.firstSetsOverlap(firsts[i], suffixFirst) {
+				return fmt.Errorf("content model is not determinisitic (UPA): sequence ambiguity due to nullable particles")
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Schema) buildFirstSet(p Particle, visitedGroups map[*ModelGroup]bool, visitedRefs map[QName]bool) *firstSet {
+	fs := &firstSet{}
+	switch pt := p.(type) {
+	case *ElementDecl:
+		// expected name and its substitution members
+		for _, q := range s.allowedNamesFor(pt.Name) { fs.addName(q) }
+	case *ElementRef:
+		for _, q := range s.allowedNamesFor(pt.Ref) { fs.addName(q) }
+	case *AnyElement:
+		fs.addWildcard(pt.Namespace)
+	case *GroupRef:
+		if visitedRefs[pt.Ref] { return fs }
+		visitedRefs[pt.Ref] = true
+		s.mu.RLock(); g := s.Groups[pt.Ref]; s.mu.RUnlock()
+		if g != nil {
+			gfs := s.buildFirstSet(g, visitedGroups, visitedRefs)
+			for q := range gfs.names { fs.addName(q) }
+			fs.wildcards = append(fs.wildcards, gfs.wildcards...)
+		}
+		delete(visitedRefs, pt.Ref)
+	case *ModelGroup:
+		if visitedGroups[pt] { return fs }
+		visitedGroups[pt] = true
+		if pt.Kind == ChoiceGroup || pt.Kind == AllGroup {
+			for _, cp := range pt.Particles {
+				cfs := s.buildFirstSet(cp, visitedGroups, visitedRefs)
+				for q := range cfs.names { fs.addName(q) }
+				fs.wildcards = append(fs.wildcards, cfs.wildcards...)
+			}
+		} else if pt.Kind == SequenceGroup {
+			// First set of sequence: from first particle(s), considering nullability
+			for _, cp := range pt.Particles {
+				cfs := s.buildFirstSet(cp, visitedGroups, visitedRefs)
+				for q := range cfs.names { fs.addName(q) }
+				fs.wildcards = append(fs.wildcards, cfs.wildcards...)
+				if !s.isNullable(cp) { break }
+			}
+		}
+		delete(visitedGroups, pt)
+	}
+	return fs
+}
+
+func (s *Schema) isNullable(p Particle) bool {
+	return s.isNullableEx(p, make(map[*ModelGroup]bool), make(map[QName]bool))
+}
+
+func (s *Schema) isNullableEx(p Particle, visitedGroups map[*ModelGroup]bool, visitedRefs map[QName]bool) bool {
+	switch pt := p.(type) {
+	case *ElementDecl:
+		return pt.MinOcc == 0
+	case *ElementRef:
+		return pt.MinOcc == 0
+	case *AnyElement:
+		return pt.MinOcc == 0
+	case *ModelGroup:
+		if visitedGroups[pt] { return false }
+		visitedGroups[pt] = true
+		switch pt.Kind {
+		case SequenceGroup, AllGroup:
+			for _, cp := range pt.Particles { if !s.isNullableEx(cp, visitedGroups, visitedRefs) { delete(visitedGroups, pt); return false } }
+			delete(visitedGroups, pt); return true
+		case ChoiceGroup:
+			for _, cp := range pt.Particles { if s.isNullableEx(cp, visitedGroups, visitedRefs) { delete(visitedGroups, pt); return true } }
+			delete(visitedGroups, pt); return false
+		}
+	case *GroupRef:
+		if visitedRefs[pt.Ref] { return false }
+		visitedRefs[pt.Ref] = true
+		// Nullable if reference allows zero or the referenced group is nullable
+		if pt.MinOcc == 0 { delete(visitedRefs, pt.Ref); return true }
+		if g, ok := s.Groups[pt.Ref]; ok { res := s.isNullableEx(g, visitedGroups, visitedRefs); delete(visitedRefs, pt.Ref); return res }
+		delete(visitedRefs, pt.Ref); return false
+	}
+	return false
+}
+
+func (s *Schema) allowedNamesFor(expected QName) []QName {
+	// include expected and all members of its substitution group (transitively)
+	var out []QName
+	seen := make(map[QName]bool)
+	queue := []QName{expected}
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+		if seen[h] { continue }
+		seen[h] = true
+		out = append(out, h)
+		if members, ok := s.SubstitutionGroups[h]; ok {
+			for _, m := range members {
+				if !seen[m] { queue = append(queue, m) }
+			}
+		}
+	}
+	return out
+}
+
+func (s *Schema) firstSetsOverlap(a, b *firstSet) bool {
+	// name-name overlap
+	for q := range a.names { if b.names[q] { return true } }
+	for q := range b.names { if a.names[q] { return true } }
+	// name-wildcard overlap
+	for q := range a.names {
+		for _, wc := range b.wildcards { if wc.Matches(q.Namespace, s.TargetNamespace) { return true } }
+	}
+	for q := range b.names {
+		for _, wc := range a.wildcards { if wc.Matches(q.Namespace, s.TargetNamespace) { return true } }
+	}
+	// wildcard-wildcard overlap (coarse)
+	for _, wc1 := range a.wildcards {
+		for _, wc2 := range b.wildcards { if wildcardsOverlap(wc1, wc2, s.TargetNamespace) { return true } }
+	}
+	return false
+}
+
+func (s *Schema) elementInFirstSet(elem xmldom.Element, group *ModelGroup) bool {
+	elemQName := QName{Namespace: string(elem.NamespaceURI()), Local: string(elem.LocalName())}
+	fs := s.buildFirstSet(group, make(map[*ModelGroup]bool), make(map[QName]bool))
+	// name match
+	if fs.names[elemQName] { return true }
+	// Also allow if element can substitute any expected name
+	for q := range fs.names {
+		if s.isSubstitutableFor(elemQName, q) { return true }
+	}
+	// wildcard match
+	for _, wc := range fs.wildcards {
+		if wc.Matches(elemQName.Namespace, s.TargetNamespace) { return true }
+	}
+	return false
+}
+
+func wildcardsOverlap(c1, c2 *WildcardNamespaceConstraint, targetNS string) bool {
+	// Trivial any
+	if c1.Mode == "##any" || c2.Mode == "##any" { return true }
+	// Other vs other overlaps (assume there exist other namespaces)
+	if c1.Mode == "##other" && c2.Mode == "##other" { return true }
+	// If one is other and the other includes at least one non-target namespace, assume overlap
+	if c1.Mode == "##other" && c2.Mode == "list" {
+		for _, ns := range c2.Namespaces { if ns != targetNS && ns != "##targetNamespace" && ns != "##local" { return true } }
+	}
+	if c2.Mode == "##other" && c1.Mode == "list" {
+		for _, ns := range c1.Namespaces { if ns != targetNS && ns != "##targetNamespace" && ns != "##local" { return true } }
+	}
+	// list-list: check common tokens
+	if c1.Mode == "list" && c2.Mode == "list" {
+		set := make(map[string]bool, len(c1.Namespaces))
+		for _, ns := range c1.Namespaces { set[ns] = true }
+		for _, ns := range c2.Namespaces { if set[ns] { return true } }
+		// map ##targetNamespace token to actual targetNS string
+		if set["##targetNamespace"] {
+			for _, ns := range c2.Namespaces { if ns == targetNS || ns == "##targetNamespace" { return true } }
+		}
+		if set["##local"] {
+			for _, ns := range c2.Namespaces { if ns == "##local" { return true } }
+		}
+		// symmetric cases covered by initial set
+	}
+	// other mixed cases: conservative false
+	return false
 }

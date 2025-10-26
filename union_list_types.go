@@ -119,8 +119,13 @@ func validateSimpleTypeValue(value string, st *SimpleType, schema *Schema) error
 	if st.Restriction != nil {
 		// First validate against base type if it exists
 		if st.Restriction.Base != (QName{}) {
+			// Apply default whitespace normalization for string-derived builtins
+			baseLocal := st.Restriction.Base.Local
+			if ws := defaultWhiteSpaceForBuiltin(baseLocal); ws != "" {
+				value = NormalizeWhiteSpace(value, ws)
+			}
 			// Check built-in base type
-			if validator := GetBuiltinTypeValidator(st.Restriction.Base.Local); validator != nil {
+			if validator := GetBuiltinTypeValidator(baseLocal); validator != nil {
 				if err := validator(value); err != nil {
 					return err
 				}

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // FacetValidator validates a value against a facet constraint
@@ -131,21 +132,23 @@ func (f *MaxLengthFacet) Validate(value string, baseType Type) error {
 
 // getLength returns the length of a value based on its type
 func getLength(value string, baseType Type) int {
-	// For list types, length is number of items
-	if strings.Contains(value, " ") {
-		// Check if it's a SimpleType with a List component
-		if st, ok := baseType.(*SimpleType); ok && st.List != nil {
-			return len(strings.Fields(value))
-		}
+	// For list types, length is number of items (when base is a list)
+	if st, ok := baseType.(*SimpleType); ok && st.List != nil {
+		return len(strings.Fields(value))
+	}
+
+	baseName := ""
+	if baseType != nil {
+		baseName = baseType.Name().Local
 	}
 	
 	// For hexBinary, length is number of octets (bytes)
-	if IsBuiltinType("hexBinary") {
+	if baseName == "hexBinary" {
 		return len(value) / 2
 	}
 	
-	// For base64Binary, we need to decode to get actual byte length
-	if IsBuiltinType("base64Binary") {
+	// For base64Binary, estimate byte length from encoded form
+	if baseName == "base64Binary" {
 		// Approximate - not exact but good enough for validation
 		n := len(value)
 		// Remove padding
@@ -157,7 +160,7 @@ func getLength(value string, baseType Type) int {
 		return n * 3 / 4
 	}
 	
-	// For string types, length is number of characters (runes)
+	// Default: length in Unicode code points
 	return len([]rune(value))
 }
 
@@ -326,7 +329,24 @@ func NormalizeWhiteSpace(value string, whiteSpace string) string {
 		return result
 	
 	default: // "preserve"
-		return value
+return value
+}
+
+}
+
+// defaultWhiteSpaceForBuiltin returns the default whiteSpace behavior for a built-in type
+// per XSD 1.0: string(preserve), normalizedString(replace), token(collapse),
+// and all token-derivatives (Name, NCName, NMTOKEN(S), ID(REF)(S), ENTITY(IES), language) collapse.
+func defaultWhiteSpaceForBuiltin(name string) string {
+	switch name {
+	case "string":
+		return "preserve"
+	case "normalizedString":
+		return "replace"
+	case "token", "Name", "NCName", "NMTOKEN", "NMTOKENS", "ID", "IDREF", "IDREFS", "ENTITY", "ENTITIES", "language":
+		return "collapse"
+	default:
+		return ""
 	}
 }
 
@@ -338,42 +358,98 @@ func compareValues(v1, v2 string, baseType Type) (int, error) {
 		typeName = baseType.Name().Local
 	}
 	
-	// Numeric comparisons
+	// Numeric comparisons (decimal/integer families)
 	if isNumericType(typeName) {
-		// Use big.Float for arbitrary precision
+		// Use big.Float for arbitrary precision numeric comparison
 		f1 := new(big.Float)
 		f2 := new(big.Float)
 		
 		if _, _, err := f1.Parse(v1, 10); err != nil {
-			// Try parsing as integer
+			// Fallback: parse as big.Int
 			i1 := new(big.Int)
 			if _, ok := i1.SetString(v1, 10); !ok {
 				return 0, fmt.Errorf("invalid numeric value: %s", v1)
 			}
 			f1.SetInt(i1)
 		}
-		
 		if _, _, err := f2.Parse(v2, 10); err != nil {
-			// Try parsing as integer
 			i2 := new(big.Int)
 			if _, ok := i2.SetString(v2, 10); !ok {
 				return 0, fmt.Errorf("invalid numeric value: %s", v2)
 			}
 			f2.SetInt(i2)
 		}
-		
 		return f1.Cmp(f2), nil
 	}
 	
 	// Date/time comparisons
-	if isDateTimeType(typeName) {
-		// For simplicity, use string comparison (not fully correct for all cases)
-		// A complete implementation would parse and compare as time values
-		return strings.Compare(v1, v2), nil
+	switch typeName {
+	case "dateTime":
+		t1, err := parseXSDDateTime(v1)
+		if err != nil { return 0, err }
+		t2, err := parseXSDDateTime(v2)
+		if err != nil { return 0, err }
+		if t1.Before(t2) { return -1, nil }
+		if t1.After(t2) { return 1, nil }
+		return 0, nil
+	case "date":
+		t1, err := parseXSDDate(v1)
+		if err != nil { return 0, err }
+		t2, err := parseXSDDate(v2)
+		if err != nil { return 0, err }
+		if t1.Before(t2) { return -1, nil }
+		if t1.After(t2) { return 1, nil }
+		return 0, nil
+	case "time":
+		t1, err := parseXSDTime(v1)
+		if err != nil { return 0, err }
+		t2, err := parseXSDTime(v2)
+		if err != nil { return 0, err }
+		if t1.Before(t2) { return -1, nil }
+		if t1.After(t2) { return 1, nil }
+		return 0, nil
 	}
 	
 	// String comparison as fallback
 	return strings.Compare(v1, v2), nil
+}
+
+// Helpers to parse XSD date/time lexical forms
+func parseXSDDateTime(s string) (time.Time, error) {
+	layouts := []string{
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05.999Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05.999",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil { return t, nil }
+	}
+	return time.Time{}, fmt.Errorf("invalid dateTime value: %s", s)
+}
+
+func parseXSDDate(s string) (time.Time, error) {
+	layouts := []string{
+		"2006-01-02Z07:00",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil { return t, nil }
+	}
+	return time.Time{}, fmt.Errorf("invalid date value: %s", s)
+}
+
+func parseXSDTime(s string) (time.Time, error) {
+	layouts := []string{
+		"15:04:05Z07:00",
+		"15:04:05.999Z07:00",
+		"15:04:05",
+		"15:04:05.999",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil { return t, nil }
+	}
+	return time.Time{}, fmt.Errorf("invalid time value: %s", s)
 }
 
 func isNumericType(typeName string) bool {
@@ -451,10 +527,18 @@ func ParseFacet(name string, value string) FacetValidator {
 // ValidateFacets validates a value against a list of facets
 func ValidateFacets(value string, facets []FacetValidator, baseType Type) error {
 	// First apply whitespace normalization if specified
+	appliedWS := false
 	for _, f := range facets {
 		if ws, ok := f.(*WhiteSpaceFacet); ok {
 			value = NormalizeWhiteSpace(value, ws.Value)
+			appliedWS = true
 			break
+		}
+	}
+// If no explicit whiteSpace, apply built-in defaults for string-derivatives
+	if !appliedWS && baseType != nil {
+		if ws := defaultWhiteSpaceForBuiltin(baseType.Name().Local); ws != "" {
+			value = NormalizeWhiteSpace(value, ws)
 		}
 	}
 	
