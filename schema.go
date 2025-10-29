@@ -533,10 +533,15 @@ func (s *Schema) isSubstitutableFor(actualElement, expectedElement QName) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	//fmt.Printf("[DEBUG] isSubstitutableFor: actual=%+v, expected=%+v\n", actualElement, expectedElement)
+
 	// Check if actualElement is in the substitution group of expectedElement
 	if members, exists := s.SubstitutionGroups[expectedElement]; exists {
+		//fmt.Printf("[DEBUG] Found %d members in substitution group\n", len(members))
 for _, member := range members {
+	//fmt.Printf("[DEBUG]   Checking member: %+v\n", member)
 	if member == actualElement {
+		//fmt.Printf("[DEBUG]   MATCH FOUND!\n")
 				// Enforce head element block constraints
 if headDecl := s.ElementDecls[expectedElement]; headDecl != nil {
 					if headDecl.Block != nil {
@@ -575,8 +580,10 @@ compatible := s.isTypeCompatible(actualDecl.Type, expectedDecl.Type)
 					return true
 				}
 
-				// Compatibility check failed - allow substitution if types exist (backward compatibility)
-				return actualDecl.Type != nil && expectedDecl.Type != nil
+				// Compatibility check failed - allow substitution if either:
+				// 1. Head element has no type (common for abstract elements)
+				// 2. Both types exist (backward compatibility)
+				return expectedDecl.Type == nil || (actualDecl.Type != nil && expectedDecl.Type != nil)
 			}
 		}
 	}
@@ -2249,6 +2256,24 @@ case SequenceGroup:
 		violations = mg.validateSequence(childElements, schema)
 	}
 case ChoiceGroup:
+	// Fast-path: single wildcard alternative behaves like allowing that wildcard
+	if len(mg.Particles) == 1 {
+		if wc, ok := mg.Particles[0].(*AnyElement); ok {
+			matchCount := 0
+			for _, ch := range childElements {
+				if MatchesWildcard(ch, wc.Namespace, schema.TargetNamespace) {
+					matchCount++
+					violations = append(violations, ValidateAnyElement(ch, wc, schema)...)
+				} else {
+					// This child cannot be produced by the single wildcard alternative
+					violations = append(violations, Violation{ Element: ch, Code: "cvc-complex-type.2.4.d", Message: fmt.Sprintf("Unexpected element '%s'", ch.LocalName()) })
+				}
+			}
+			// Enforce wildcard occurrence bounds
+			violations = append(violations, ValidateWildcardOccurrences(matchCount, wc)...)
+			break
+		}
+	}
 	if schema != nil && schema.StrictContentModel {
 		violations = mg.validateChoiceStrict(childElements, schema)
 	} else {
@@ -2267,6 +2292,14 @@ return violations
 
 // Strict variants (initially delegate to existing implementations)
 func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *Schema) []Violation {
+	type altMatch struct{ consumed int; violations []Violation }
+	type choiceFrame struct{
+		particleIndex int
+		idxBefore int
+		altMatches []altMatch
+		altChosen int
+		violationsLen int
+	}
 	var violations []Violation
 	idx := 0
 	occ := 0
@@ -2278,12 +2311,13 @@ func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *
 		return nil
 	}
 
-	for maxG == -1 || occ < maxG {
+for maxG == -1 || occ < maxG {
+		stack := make([]choiceFrame, 0, 4)
 		startIdx := idx
 		matchedAll := true
 		allOptional := true
 
-		for pi := 0; pi < len(mg.Particles); pi++ {
+		for pi := 0; pi < len(mg.Particles); {
 			p := mg.Particles[pi]
 			var next Particle
 			if pi+1 < len(mg.Particles) { next = mg.Particles[pi+1] }
@@ -2306,6 +2340,31 @@ func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *
 					idx++
 				}
 			} else if choiceGrp, ok := p.(*ModelGroup); ok && choiceGrp.Kind == ChoiceGroup {
+				// compute alternatives
+				alts := make([]altMatch, 0, len(choiceGrp.Particles))
+				for _, alt := range choiceGrp.Particles {
+					m, c, v := mg.matchParticle(alt, children[idx:], schema)
+					if c > 0 && m >= alt.MinOccurs() {
+						// prefer those that allow next to match if required handled indirectly via backtrack
+						alts = append(alts, altMatch{consumed: c, violations: v})
+					}
+				}
+				if len(alts) == 0 {
+					if minP == 0 { pi++; continue } // optional choice
+					// will trigger backtrack/fail below by count<minP
+				} else {
+					// pick longest first
+					best := 0
+					for i := 1; i < len(alts); i++ { if alts[i].consumed > alts[best].consumed { best = i } }
+					// push frame for backtracking
+					stack = append(stack, choiceFrame{particleIndex: pi, idxBefore: idx, altMatches: alts, altChosen: best, violationsLen: len(violations)})
+					// apply
+					violations = append(violations, alts[best].violations...)
+					count++
+					idx += alts[best].consumed
+					pi++
+					continue
+				}
 				for (maxP == -1 || count < maxP) && idx < len(children) {
 					c, v := mg.matchChoiceWithLookahead(choiceGrp, children[idx:], next, schema)
 					if c == 0 {
@@ -2331,9 +2390,39 @@ func (mg *ModelGroup) validateSequenceStrict(children []xmldom.Element, schema *
 			}
 
 			if count < minP {
-				matchedAll = false
-				break
+				// backtrack if possible
+				btDone := false
+				for !btDone && len(stack) > 0 {
+					// pop
+					frame := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					if frame.altChosen+1 < len(frame.altMatches) {
+						// try next alt
+						idx = frame.idxBefore
+						violations = violations[:frame.violationsLen]
+						// apply next alt
+						nextIdx := frame.altChosen+1
+						nextAlt := frame.altMatches[nextIdx]
+						violations = append(violations, nextAlt.violations...)
+						idx += nextAlt.consumed
+						// push updated frame
+						frame.altChosen = nextIdx
+						stack = append(stack, frame)
+						// continue from particle after this choice
+						pi = frame.particleIndex + 1
+						btDone = true
+						continue
+					}
+				}
+				if !btDone {
+					matchedAll = false
+					break
+				}
+				// satisfied by backtrack; proceed to next particle
+				continue
 			}
+			// advance particle index when current particle satisfied
+			pi++
 		}
 
 		if matchedAll {
@@ -2815,14 +2904,35 @@ func (mg *ModelGroup) validateAll(children []xmldom.Element, schema *Schema) []V
 				found = true
 
 				// Validate the matched element's type
-				if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl && elemDecl.Type != nil {
-					typeViolations := elemDecl.Type.Validate(child, schema)
-					violations = append(violations, typeViolations...)
+				if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl {
+					// Check if element is abstract
+					if elemDecl.Abstract {
+						violations = append(violations, Violation{
+							Element: child,
+							Code:    "cvc-elt.2",
+							Message: fmt.Sprintf("Element '%s' is abstract and cannot be used directly in instance documents", child.LocalName()),
+						})
+					}
+					if elemDecl.Type != nil {
+						typeViolations := elemDecl.Type.Validate(child, schema)
+						violations = append(violations, typeViolations...)
+					}
 				} else if elemRef, isElemRef := particle.(*ElementRef); isElemRef {
 					// For ElementRef, look up the global declaration and validate
-					if decl, exists := schema.ElementDecls[elemRef.Ref]; exists && decl.Type != nil {
-						typeViolations := decl.Type.Validate(child, schema)
-						violations = append(violations, typeViolations...)
+					if decl, exists := schema.ElementDecls[elemRef.Ref]; exists {
+						// Check if element is abstract (only if actual element matches the ref)
+						actualQName := QName{Namespace: string(child.NamespaceURI()), Local: string(child.LocalName())}
+						if actualQName == elemRef.Ref && decl.Abstract {
+							violations = append(violations, Violation{
+								Element: child,
+								Code:    "cvc-elt.2",
+								Message: fmt.Sprintf("Element '%s' is abstract and cannot be used directly in instance documents", child.LocalName()),
+							})
+						}
+						if decl.Type != nil {
+							typeViolations := decl.Type.Validate(child, schema)
+							violations = append(violations, typeViolations...)
+						}
 					}
 				}
 
@@ -3065,8 +3175,9 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 				Namespace: string(child.NamespaceURI()),
 				Local:     string(child.LocalName()),
 			}
-			if elemQName == elemDecl.Name {
-				// Element matches the inline declaration
+			// Check both direct match and substitution groups
+			if elemQName == elemDecl.Name || schema.isSubstitutableFor(elemQName, elemDecl.Name) {
+				// Element matches the inline declaration (or can substitute for it)
 				matched++
 				consumed++
 

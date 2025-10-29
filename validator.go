@@ -603,7 +603,21 @@ func (v *Validator) validateChildren(elem xmldom.Element, elemType Type) {
 
 	// Get content model
 	if ct.Content != nil {
-		// Validate against content model
+		// Strict structural validation using backtracking matcher (structure only)
+		if v.schema.StrictContentModel {
+			matcher := newContentMatcher(v.schema)
+			childrenEls := childElements(elem)
+			if !matcher.matchComplexType(ct, childrenEls) {
+				v.addViolation(elem, "", "cvc-complex-type.2.4.a", "Element content does not match the content model", nil, "")
+			}
+			// Always validate children recursively for type/attribute/datatype checks using parent model
+			for _, ch := range childrenEls {
+				v.validateChildAgainstModel(ct, ch)
+			}
+			return
+		}
+
+		// Non-strict: use existing content validation
 		violations := ct.Content.Validate(elem, v.schema)
 		for _, violation := range violations {
 			// Set element if not already set
@@ -634,6 +648,113 @@ func (v *Validator) validateChildren(elem xmldom.Element, elemType Type) {
 			v.validateElement(child, elemType)
 		}
 	}
+}
+
+// validateChildAgainstModel validates a child element using the parent's content model mapping to find its declaration/type.
+func (v *Validator) validateChildAgainstModel(parentCT *ComplexType, child xmldom.Element) {
+	if parentCT == nil || parentCT.Content == nil {
+		// Fallback
+		v.validateElement(child, parentCT)
+		return
+	}
+	// Extract model group
+	var mg *ModelGroup
+	switch c := parentCT.Content.(type) {
+	case *ModelGroup:
+		mg = c
+	case *ComplexContent:
+		var inner Content
+		if c.Extension != nil { inner = c.Extension.Content }
+		if c.Restriction != nil { inner = c.Restriction.Content }
+		if m, ok := inner.(*ModelGroup); ok { mg = m }
+	}
+	if mg == nil {
+		v.validateElement(child, parentCT)
+		return
+	}
+	// Find a matching particle for this child
+	var chosen Particle
+	for _, p := range mg.Particles {
+		if mg.elementMatchesParticle(child, p, v.schema) {
+			chosen = p
+			break
+		}
+	}
+	if chosen == nil {
+		// Unknown per model; let generic path report
+		v.validateElement(child, parentCT)
+		return
+	}
+	// Resolve declaration and type, then validate attributes and nested content
+	switch p := chosen.(type) {
+	case *ElementDecl:
+		decl := p
+		// Check if element is abstract (cannot be used directly)
+		if decl.Abstract {
+			childLocal := string(child.LocalName())
+			v.addViolation(child, "", "cvc-elt.2",
+				fmt.Sprintf("Element '%s' is abstract and cannot be used directly in instance documents", childLocal),
+				nil, childLocal)
+		}
+		// Fixed/defaults
+		v.violations = append(v.violations, ValidateElementFixedDefault(child, decl)...)
+		// Attributes
+		v.validateAttributes(child, decl.Type)
+		// Recurse
+		v.validateChildren(child, decl.Type)
+	case *ElementRef:
+		v.schema.mu.RLock(); d := v.schema.ElementDecls[p.Ref]; v.schema.mu.RUnlock()
+		if d != nil {
+			// Check if element is abstract (cannot be used directly)
+			// When we have <xsd:element ref="foo"/> where foo is abstract,
+			// and the instance has <foo>, that's invalid unless foo is being substituted
+			actualQName := QName{Namespace: string(child.NamespaceURI()), Local: string(child.LocalName())}
+			refQName := p.Ref
+			// DEBUG
+			//fmt.Printf("[DEBUG] ElementRef: actual=%+v, ref=%+v, abstract=%v, match=%v\n", actualQName, refQName, d.Abstract, actualQName == refQName)
+			// If the actual element matches the ref exactly, check if it's abstract
+			if actualQName == refQName && d.Abstract {
+				childLocal := string(child.LocalName())
+				v.addViolation(child, "", "cvc-elt.2",
+					fmt.Sprintf("Element '%s' is abstract and cannot be used directly in instance documents", childLocal),
+					nil, childLocal)
+			}
+			v.violations = append(v.violations, ValidateElementFixedDefault(child, d)...)
+			v.validateAttributes(child, d.Type)
+			v.validateChildren(child, d.Type)
+			return
+		}
+		// Fallback
+		v.validateElement(child, parentCT)
+	case *AnyElement:
+		// Validate wildcard constraints
+		v.violations = append(v.violations, ValidateAnyElement(child, p, v.schema)...)
+		// Try to find a global declaration for additional type validation if available
+		q := QName{Namespace: string(child.NamespaceURI()), Local: string(child.LocalName())}
+		v.schema.mu.RLock(); d := v.schema.ElementDecls[q]; v.schema.mu.RUnlock()
+		if d != nil {
+			v.validateAttributes(child, d.Type)
+			v.validateChildren(child, d.Type)
+		} else {
+			// Recurse generically without declaration
+			v.validateElement(child, parentCT)
+		}
+	default:
+		// Nested group reference: generic fallback
+		v.validateElement(child, parentCT)
+	}
+}
+
+// childElements returns the element children of elem
+func childElements(elem xmldom.Element) []xmldom.Element {
+	var out []xmldom.Element
+	children := elem.Children()
+	for i := uint(0); i < children.Length(); i++ {
+		if ch := children.Item(i); ch != nil {
+			out = append(out, ch)
+		}
+	}
+	return out
 }
 
 // validateIDREFs validates all collected IDREF references

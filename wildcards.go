@@ -27,21 +27,27 @@ type WildcardNamespaceConstraint struct {
 
 // ParseNamespaceConstraint parses a namespace attribute value into a constraint
 func ParseNamespaceConstraint(value string) *WildcardNamespaceConstraint {
-	if value == "" {
+	if strings.TrimSpace(value) == "" {
 		value = "##any" // Default
 	}
-
-	constraint := &WildcardNamespaceConstraint{
-		Mode: value,
+	// Split into tokens; multiple tokens imply a list, even if each token starts with '##'
+	tokens := strings.Fields(value)
+	c := &WildcardNamespaceConstraint{}
+	if len(tokens) == 1 {
+		switch tokens[0] {
+		case "##any", "##other", "##targetNamespace", "##local":
+			c.Mode = tokens[0]
+			return c
+		}
+		// Single explicit namespace URI
+		c.Mode = "list"
+		c.Namespaces = tokens
+		return c
 	}
-
-	// If it's not a special mode, parse as space-separated list
-	if !strings.HasPrefix(value, "##") {
-		constraint.Namespaces = strings.Fields(value)
-		constraint.Mode = "list"
-	}
-
-	return constraint
+	// Multiple tokens -> explicit list (can contain special macros and/or URIs)
+	c.Mode = "list"
+	c.Namespaces = tokens
+	return c
 }
 
 // Matches checks if a namespace matches this constraint

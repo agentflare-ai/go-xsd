@@ -259,7 +259,8 @@ func (sv *SchemaValidator) validateElementDecl(elem xmldom.Element) {
 
 	// Check if name is required (global element)
 	parent := elem.ParentNode()
-	if parent != nil && string(parent.LocalName()) == "schema" {
+	isGlobal := parent != nil && string(parent.LocalName()) == "schema"
+	if isGlobal {
 		// Global element must have name
 		if name == "" && ref == "" {
 			sv.addErrorAt(elem, "global element must have a name attribute")
@@ -269,6 +270,14 @@ func (sv *SchemaValidator) validateElementDecl(elem xmldom.Element) {
 	// Validate name if present
 	if name != "" && !isValidNCName(string(name)) {
 		sv.addErrorAt(elem, fmt.Sprintf("invalid element name '%s': must be a valid NCName", name))
+	}
+
+	// Disallow abstract on local element declarations (XSD 1.0)
+	if !isGlobal {
+		abs := elem.GetAttribute("abstract")
+		if abs != "" {
+			sv.addErrorAt(elem, "'abstract' is only allowed on global element declarations")
+		}
 	}
 
 	// Validate minOccurs and maxOccurs
