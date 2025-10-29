@@ -3188,7 +3188,7 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 				}
 
 				// Get the actual element declaration (for substitution groups)
-				var actualDecl *ElementDecl = elemDecl
+				actualDecl := elemDecl
 				if actualQName != elemDecl.Name {
 					if foundDecl, exists := schema.ElementDecls[actualQName]; exists {
 						actualDecl = foundDecl
