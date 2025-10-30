@@ -320,7 +320,7 @@ func (sl *SchemaLoader) loadDocument(location string) (xmldom.Document, error) {
 			return nil, fmt.Errorf("failed to fetch %s: %w", location, err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, location)
 		}
 		reader = resp.Body
@@ -333,7 +333,9 @@ func (sl *SchemaLoader) loadDocument(location string) (xmldom.Document, error) {
 		reader = file
 	}
 
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 
 	// Parse the XML document
 	doc, err := xmldom.Decode(reader)
@@ -440,14 +442,16 @@ func LoadSchemaFromString(content string, baseDir string) (*Schema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(tempFile.Name())
+	defer func() {
+		_ = os.Remove(tempFile.Name())
+	}()
 
 	// Write the content
 	if _, err := tempFile.WriteString(content); err != nil {
-		tempFile.Close()
+		_ = tempFile.Close()
 		return nil, fmt.Errorf("failed to write temp file: %w", err)
 	}
-	tempFile.Close()
+	_ = tempFile.Close()
 
 	// Load with imports
 	loader := NewSchemaLoaderSimple(baseDir)

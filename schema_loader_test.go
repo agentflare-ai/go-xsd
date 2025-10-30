@@ -15,7 +15,11 @@ func TestSchemaImport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create main schema file
 	mainSchema := `<?xml version="1.0" encoding="UTF-8"?>
@@ -113,13 +117,15 @@ func TestSchemaImport(t *testing.T) {
 	}
 
 	// Test validation with the combined schema
+	// Note: Local elements in types.xsd are unqualified since elementFormDefault
+	// is not set to "qualified", so name and email should not have namespace prefix
 	validXML := `<?xml version="1.0" encoding="UTF-8"?>
 <document xmlns="http://example.com/main"
           xmlns:types="http://example.com/types">
     <title>Test Document</title>
     <author>
-        <types:name>John Doe</types:name>
-        <types:email>john.doe@example.com</types:email>
+        <name>John Doe</name>
+        <email>john.doe@example.com</email>
     </author>
     <content>
         <paragraph>First paragraph</paragraph>
@@ -132,8 +138,8 @@ func TestSchemaImport(t *testing.T) {
           xmlns:types="http://example.com/types">
     <title>Test Document</title>
     <author>
-        <types:name>John Doe</types:name>
-        <types:email>invalid-email</types:email>
+        <name>John Doe</name>
+        <email>invalid-email</email>
     </author>
     <content>
         <paragraph>First paragraph</paragraph>
@@ -170,7 +176,11 @@ func TestSchemaInclude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create main schema file with include
 	mainSchema := `<?xml version="1.0" encoding="UTF-8"?>
@@ -330,7 +340,11 @@ func TestCircularImports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create schema A that imports B
 	schemaA := `<?xml version="1.0" encoding="UTF-8"?>

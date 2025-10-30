@@ -32,7 +32,7 @@ func main() {
 		*autoDownload = true
 		// Remove cache marker to force fresh download
 		markerPath := filepath.Join(*testSuiteDir, downloadMarker)
-		os.Remove(markerPath)
+		_ = os.Remove(markerPath)
 	}
 
 	// Ensure test suite exists (download if needed)

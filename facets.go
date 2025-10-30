@@ -469,20 +469,6 @@ func isNumericType(typeName string) bool {
 	return false
 }
 
-func isDateTimeType(typeName string) bool {
-	dateTimeTypes := []string{
-		"dateTime", "date", "time",
-		"gYear", "gYearMonth", "gMonth", "gMonthDay", "gDay",
-	}
-	
-	for _, t := range dateTimeTypes {
-		if typeName == t {
-			return true
-		}
-	}
-	return false
-}
-
 // ParseFacet parses a facet element and returns the appropriate FacetValidator
 func ParseFacet(name string, value string) FacetValidator {
 	switch name {

@@ -114,7 +114,9 @@ func (r *W3CTestRunner) LoadTestSet(metadataPath string) (*W3CTestSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open test metadata: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -257,7 +259,9 @@ validator := NewValidator(schema)
 		result.Passed = false
 		return result
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	doc, err := xmldom.Decode(file)
 	if err != nil {

@@ -261,7 +261,9 @@ func LoadSchema(filename string) (*Schema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	doc, err := xmldom.Decode(file)
 	if err != nil {
@@ -859,11 +861,12 @@ func (s *Schema) parseInlineElement(elem xmldom.Element) *ElementDecl {
 	// Determine namespace based on form attribute or elementFormDefault
 	form := string(elem.GetAttribute("form"))
 	ns := ""
-	if form == "qualified" {
+	switch form {
+	case "qualified":
 		ns = s.TargetNamespace
-	} else if form == "unqualified" {
+	case "unqualified":
 		ns = ""
-	} else {
+	default:
 		if s.ElementFormDefault == "qualified" {
 			ns = s.TargetNamespace
 		} else {
@@ -1501,9 +1504,10 @@ func (s *Schema) parseAttribute(elem xmldom.Element) *AttributeDecl {
 		ns = s.TargetNamespace
 	} else {
 		form := string(elem.GetAttribute("form"))
-		if form == "qualified" {
+		switch form {
+		case "qualified":
 			ns = s.TargetNamespace
-		} else if form == "unqualified" || form == "" {
+		case "unqualified", "":
 			if s.AttributeFormDefault == "qualified" {
 				ns = s.TargetNamespace
 			} else {
@@ -1901,10 +1905,6 @@ func (s *Schema) resolveParticles(particles []Particle) []Particle {
 }
 
 // resolveParticlesWithVisited recursively resolves GroupRef particles with cycle detection (backward compat)
-func (s *Schema) resolveParticlesWithVisited(particles []Particle, visitedRefs map[QName]bool) []Particle {
-	return s.resolveParticlesWithVisitedEx(particles, visitedRefs, make(map[*ModelGroup]bool))
-}
-
 // resolveParticlesWithVisitedEx resolves particles guarding both GroupRef (QName) and ModelGroup pointer cycles
 func (s *Schema) resolveParticlesWithVisitedEx(particles []Particle, visitedRefs map[QName]bool, visitedGroups map[*ModelGroup]bool) []Particle {
 	var resolved []Particle
@@ -3171,12 +3171,8 @@ func (mg *ModelGroup) matchParticle(particle Particle, children []xmldom.Element
 	if elemDecl, isElemDecl := particle.(*ElementDecl); isElemDecl {
 		for i := 0; i < len(children); i++ {
 			child := children[i]
-			elemQName := QName{
-				Namespace: string(child.NamespaceURI()),
-				Local:     string(child.LocalName()),
-			}
-			// Check both direct match and substitution groups
-			if elemQName == elemDecl.Name || schema.isSubstitutableFor(elemQName, elemDecl.Name) {
+			// Use elementMatchesParticle for proper namespace handling
+			if mg.elementMatchesParticle(child, elemDecl, schema) {
 				// Element matches the inline declaration (or can substitute for it)
 				matched++
 				consumed++
@@ -3452,6 +3448,24 @@ case *ElementDecl:
 		if elemQName == p.Name {
 			return true
 		}
+		// Try with target namespace if element has no namespace
+		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
+			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
+			if testQName == p.Name {
+				return true
+			}
+			if schema.isSubstitutableFor(testQName, p.Name) {
+				return true
+			}
+		}
+		// Try matching if expected element has no namespace but instance has target namespace
+		// This handles the case where elementFormDefault="unqualified" but xmlns is used
+		if p.Name.Namespace == "" && elemQName.Namespace == schema.TargetNamespace {
+			testQName := QName{Namespace: "", Local: elemQName.Local}
+			if testQName == p.Name {
+				return true
+			}
+		}
 		// Check substitution groups - can this element substitute for the expected element?
 		return schema.isSubstitutableFor(elemQName, p.Name)
 case *ElementRef:
@@ -3463,6 +3477,23 @@ case *ElementRef:
 		// Direct match
 		if elemQName == p.Ref {
 			return true
+		}
+		// Try with target namespace if element has no namespace
+		if elemQName.Namespace == "" && schema.TargetNamespace != "" {
+			testQName := QName{Namespace: schema.TargetNamespace, Local: elemQName.Local}
+			if testQName == p.Ref {
+				return true
+			}
+			if schema.isSubstitutableFor(testQName, p.Ref) {
+				return true
+			}
+		}
+		// Try matching if expected element has no namespace but instance has target namespace
+		if p.Ref.Namespace == "" && elemQName.Namespace == schema.TargetNamespace {
+			testQName := QName{Namespace: "", Local: elemQName.Local}
+			if testQName == p.Ref {
+				return true
+			}
 		}
 		// Check substitution groups
 		return schema.isSubstitutableFor(elemQName, p.Ref)

@@ -89,7 +89,9 @@ func downloadAndExtract(url, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
@@ -119,7 +121,9 @@ func downloadAndExtract(url, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer gzReader.Close()
+	defer func() {
+		_ = gzReader.Close()
+	}()
 
 	// Extract tar
 	tarReader := tar.NewReader(gzReader)
@@ -182,10 +186,10 @@ func downloadAndExtract(url, destDir string) error {
 			}
 
 			if _, err := io.Copy(file, tarReader); err != nil {
-				file.Close()
+				_ = file.Close()
 				return fmt.Errorf("failed to write file %s: %w", target, err)
 			}
-			file.Close()
+			_ = file.Close()
 			extractedFiles++
 		}
 	}
