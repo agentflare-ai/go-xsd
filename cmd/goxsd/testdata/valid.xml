@@ -1,0 +1,4 @@
+<note xmlns="http://example.com/goxsd" id="n1">
+    <to>World</to>
+    <body>Hello</body>
+</note>

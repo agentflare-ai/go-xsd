@@ -96,6 +96,7 @@ type W3CTestRunner struct {
 	Verbose            bool
 	StrictContentModel bool
 	Grep               string // optional substring filter on set/group/test names
+	LogWriter          io.Writer
 }
 
 // NewW3CTestRunner creates a test runner for the W3C test suite
@@ -105,6 +106,7 @@ func NewW3CTestRunner(testSuiteDir string) *W3CTestRunner {
 		Results:            []W3CTestResult{},
 		StrictContentModel: false,
 		Grep:               "",
+		LogWriter:          os.Stdout,
 	}
 }
 
@@ -236,20 +238,20 @@ func (r *W3CTestRunner) runInstanceTest(testSet, testGroup string, test W3CInsta
 		instancePath = filepath.Join(filepath.Dir(metadataDir), test.InstanceDocument.Href)
 	}
 
-// Load the schema
-schema, err := LoadSchema(schemaPath)
-if err != nil {
+	// Load the schema
+	schema, err := LoadSchema(schemaPath)
+	if err != nil {
 		result.Actual = "error"
 		result.Error = fmt.Errorf("failed to load schema: %w", err)
 		result.Passed = false
 		return result
 	}
 
-// Apply runner options
-schema.StrictContentModel = r.StrictContentModel
+	// Apply runner options
+	schema.StrictContentModel = r.StrictContentModel
 
-// Create validator
-validator := NewValidator(schema)
+	// Create validator
+	validator := NewValidator(schema)
 
 	// Load and validate the instance document
 	file, err := os.Open(instancePath)
@@ -295,14 +297,19 @@ func (r *W3CTestRunner) printResult(result W3CTestResult) {
 		status = "FAIL"
 	}
 
-	fmt.Printf("[%s] %s/%s/%s: expected=%s, actual=%s",
+	writer := r.LogWriter
+	if writer == nil {
+		writer = os.Stdout
+	}
+
+	fmt.Fprintf(writer, "[%s] %s/%s/%s: expected=%s, actual=%s",
 		status, result.TestSet, result.TestGroup, result.TestName,
 		result.Expected, result.Actual)
 
 	if result.Error != nil && !result.Passed {
-		fmt.Printf(" (error: %v)", result.Error)
+		fmt.Fprintf(writer, " (error: %v)", result.Error)
 	}
-	fmt.Println()
+	fmt.Fprintln(writer)
 }
 
 // GenerateReport generates a summary report of test results
@@ -382,14 +389,18 @@ func (r *W3CTestRunner) RunMetadataFile(metadataPath string) error {
 	}
 
 	r.RunTestSet(testSet, metadataPath)
-return nil
+	return nil
 }
 
 // loadInstanceSchemaHints loads additional schemas referenced by xsi:schemaLocation hints on the instance root
 func loadInstanceSchemaHints(schema *Schema, doc xmldom.Document, baseDir string) {
-	if doc == nil || schema == nil { return }
+	if doc == nil || schema == nil {
+		return
+	}
 	root := doc.DocumentElement()
-	if root == nil { return }
+	if root == nil {
+		return
+	}
 
 	// Parse xsi:schemaLocation (pairs of namespace and location)
 	sl := root.GetAttributeNS("http://www.w3.org/2001/XMLSchema-instance", "schemaLocation")
@@ -404,10 +415,14 @@ func loadInstanceSchemaHints(schema *Schema, doc xmldom.Document, baseDir string
 				path = filepath.Join(baseDir, loc)
 			}
 			if loaded, err := LoadSchema(path); err == nil && loaded != nil {
-				if schema.ImportedSchemas == nil { schema.ImportedSchemas = make(map[string]*Schema) }
+				if schema.ImportedSchemas == nil {
+					schema.ImportedSchemas = make(map[string]*Schema)
+				}
 				// Key by namespace if available; otherwise by path
 				key := ns
-				if key == "" { key = path }
+				if key == "" {
+					key = path
+				}
 				schema.ImportedSchemas[key] = loaded
 			}
 		}
@@ -422,7 +437,9 @@ func loadInstanceSchemaHints(schema *Schema, doc xmldom.Document, baseDir string
 			path = filepath.Join(baseDir, loc)
 		}
 		if loaded, err := LoadSchema(path); err == nil && loaded != nil {
-			if schema.ImportedSchemas == nil { schema.ImportedSchemas = make(map[string]*Schema) }
+			if schema.ImportedSchemas == nil {
+				schema.ImportedSchemas = make(map[string]*Schema)
+			}
 			schema.ImportedSchemas[path] = loaded
 		}
 	}

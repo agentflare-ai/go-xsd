@@ -8,5 +8,8 @@ require github.com/agentflare-ai/go-xmldom v0.1.1
 
 require (
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/cobra v1.8.0 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )

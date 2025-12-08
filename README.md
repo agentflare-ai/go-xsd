@@ -10,35 +10,38 @@ A comprehensive XML Schema Definition (XSD) validator for Go that provides W3C-c
 ## Features
 
 ### Core Validation
-- **Full XSD 1.0 Support**: Comprehensive validation according to W3C XML Schema specifications
-- **Schema Loading**: Load schemas with automatic import/include resolution and circular dependency protection
-- **Built-in Types**: All standard XSD built-in types (string, int, date, etc.)
-- **Complex Types**: Support for sequences, choices, all groups, and nested content models
-  - ComplexContent with extension/restriction
-  - SimpleContent with extension/restriction
-  - Mixed content models
-- **Simple Types**: Full support for restrictions, lists, unions, and all standard facets
-- **Type Derivation**: Proper type compatibility checking for extensions and restrictions
+
+* **Full XSD 1.0 Support**: Comprehensive validation according to W3C XML Schema specifications
+* **Schema Loading**: Load schemas with automatic import/include resolution and circular dependency protection
+* **Built-in Types**: All standard XSD built-in types (string, int, date, etc.)
+* **Complex Types**: Support for sequences, choices, all groups, and nested content models
+  * ComplexContent with extension/restriction
+  * SimpleContent with extension/restriction
+  * Mixed content models
+* **Simple Types**: Full support for restrictions, lists, unions, and all standard facets
+* **Type Derivation**: Proper type compatibility checking for extensions and restrictions
 
 ### Advanced Features
-- **Identity Constraints**: key, keyref, and unique constraints with XPath selectors
-  - Proper ID/IDREF type detection (not just name-based)
-  - Type-aware validation including derived types
-- **Wildcards**: `<xs:any>` and `<xs:anyAttribute>` with namespace constraint validation
-  - Namespace constraints: ##any, ##other, ##targetNamespace, ##local
-  - ProcessContents modes: strict, lax, skip
-- **Substitution Groups**: Element substitution with type compatibility verification
-  - Validates that substituting element's type derives from head element's type
-  - Cycle detection prevents infinite recursion
-- **Fixed/Default Values**: Validation of fixed and default attribute/element values
-- **Attribute Groups**: Full support for attribute group references and resolution
-- **Model Groups**: Support for named group definitions and references
+
+* **Identity Constraints**: key, keyref, and unique constraints with XPath selectors
+  * Proper ID/IDREF type detection (not just name-based)
+  * Type-aware validation including derived types
+* **Wildcards**: `<xs:any>` and `<xs:anyAttribute>` with namespace constraint validation
+  * Namespace constraints: ##any, ##other, ##targetNamespace, ##local
+  * ProcessContents modes: strict, lax, skip
+* **Substitution Groups**: Element substitution with type compatibility verification
+  * Validates that substituting element's type derives from head element's type
+  * Cycle detection prevents infinite recursion
+* **Fixed/Default Values**: Validation of fixed and default attribute/element values
+* **Attribute Groups**: Full support for attribute group references and resolution
+* **Model Groups**: Support for named group definitions and references
 
 ### Performance & Safety
-- **Schema Caching**: Efficient schema reuse with LRU caching
-- **Thread-Safe**: Concurrent schema validation support with proper locking
-- **Cycle Detection**: Protects against infinite recursion in type hierarchies
-- **Memory Efficient**: Optimized allocations in hot paths, GC-friendly design
+
+* **Schema Caching**: Efficient schema reuse with LRU caching
+* **Thread-Safe**: Concurrent schema validation support with proper locking
+* **Cycle Detection**: Protects against infinite recursion in type hierarchies
+* **Memory Efficient**: Optimized allocations in hot paths, GC-friendly design
 
 ## Installation
 
@@ -216,17 +219,17 @@ type Violation struct {
 }
 ```
 
-Error codes follow W3C XML Schema validation error conventions (cvc-* codes).
+Error codes follow W3C XML Schema validation error conventions (cvc-\* codes).
 
 ### Type System
 
 The library supports all XSD types:
 
-- **Simple Types**: string, int, boolean, date, time, decimal, etc.
-- **Complex Types**: Elements with child content and attributes
-- **Lists**: Space-separated lists of values
-- **Unions**: Values that can be one of several types
-- **Restrictions**: Types with facet constraints (minLength, maxLength, pattern, etc.)
+* **Simple Types**: string, int, boolean, date, time, decimal, etc.
+* **Complex Types**: Elements with child content and attributes
+* **Lists**: Space-separated lists of values
+* **Unions**: Values that can be one of several types
+* **Restrictions**: Types with facet constraints (minLength, maxLength, pattern, etc.)
 
 ### Identity Constraints
 
@@ -251,12 +254,12 @@ Support for XSD identity constraints:
 
 The library validates all standard XSD facets:
 
-- Length constraints: `minLength`, `maxLength`, `length`
-- Numeric bounds: `minInclusive`, `maxInclusive`, `minExclusive`, `maxExclusive`
-- Total digits and fraction digits
-- Pattern matching (regular expressions)
-- Enumeration restrictions
-- Whitespace handling
+* Length constraints: `minLength`, `maxLength`, `length`
+* Numeric bounds: `minInclusive`, `maxInclusive`, `minExclusive`, `maxExclusive`
+* Total digits and fraction digits
+* Pattern matching (regular expressions)
+* Enumeration restrictions
+* Whitespace handling
 
 ### Substitution Groups
 
@@ -313,30 +316,31 @@ go run ./cmd/w3c_test --auto-download --verbose
 ### Test Coverage
 
 The library includes comprehensive tests including:
-- **W3C Conformance Suite**: Official W3C test cases (runs in CI)
-- **Identity Constraints**: key, keyref, and unique validation
-- **Substitution Groups**: Element substitution and type checking
-- **Wildcard Validation**: xs:any and xs:anyAttribute handling
-- **Fixed/Default Values**: Attribute and element defaults
-- **Union and List Types**: Complex type composition
+
+* **W3C Conformance Suite**: Official W3C test cases (runs in CI)
+* **Identity Constraints**: key, keyref, and unique validation
+* **Substitution Groups**: Element substitution and type checking
+* **Wildcard Validation**: xs:any and xs:anyAttribute handling
+* **Fixed/Default Values**: Attribute and element defaults
+* **Union and List Types**: Complex type composition
 
 ## Error Codes
 
 Validation errors use W3C XML Schema validation error codes (Component Validation Constraint codes):
 
-| Code | Description |
-|------|-------------|
-| `cvc-complex-type.2.4.a` | Missing required element |
-| `cvc-complex-type.2.4.b` | Element not allowed by content model |
-| `cvc-complex-type.2.4.d` | Unexpected element |
-| `cvc-datatype-valid.1` | Invalid value for datatype |
-| `cvc-enumeration-valid` | Value not in enumeration |
-| `cvc-id.1` | ID value must be unique |
-| `cvc-id.2` | Duplicate ID value |
-| `cvc-wildcard.2` | Element not allowed by namespace constraint |
-| `cvc-attribute.3` | Attribute value invalid |
-| `cvc-complex-type.3.2.2` | Attribute not allowed |
-| `cvc-complex-type.4` | Attribute required but missing |
+| Code                     | Description                                 |
+| ------------------------ | ------------------------------------------- |
+| `cvc-complex-type.2.4.a` | Missing required element                    |
+| `cvc-complex-type.2.4.b` | Element not allowed by content model        |
+| `cvc-complex-type.2.4.d` | Unexpected element                          |
+| `cvc-datatype-valid.1`   | Invalid value for datatype                  |
+| `cvc-enumeration-valid`  | Value not in enumeration                    |
+| `cvc-id.1`               | ID value must be unique                     |
+| `cvc-id.2`               | Duplicate ID value                          |
+| `cvc-wildcard.2`         | Element not allowed by namespace constraint |
+| `cvc-attribute.3`        | Attribute value invalid                     |
+| `cvc-complex-type.3.2.2` | Attribute not allowed                       |
+| `cvc-complex-type.4`     | Attribute required but missing              |
 
 Full list follows W3C XML Schema 1.0 Part 1: Structures specification.
 
@@ -358,63 +362,75 @@ go-xsd/
 ├── diagnostic.go         # Violation reporting and formatting
 ├── fixes.plan.md         # Development roadmap and tracking
 └── cmd/
-    ├── validate/         # CLI validation tool
-    └── w3c_test/         # W3C test suite runner
+    └── goxsd/            # Unified Cobra CLI (validate/test/doc)
 ```
 
 ## Command-Line Tools
 
-### validate
+### goxsd
 
-Validate an XML document against a schema:
-
-```bash
-go run ./cmd/validate schema.xsd document.xml
-```
-
-### w3c_test
-
-Run W3C XSD test suite:
+A single Cobra-based binary exposes subcommands for validation, conformance testing, and documentation generation:
 
 ```bash
-# Auto-download and run (downloads once, cached for 7 days)
-go run ./cmd/w3c_test --auto-download
+# Validate XML documents with human-readable diagnostics
+goxsd validate schema.xsd document.xml another.xml
 
-# Run with specific suite directory
-go run ./cmd/w3c_test -suite /path/to/w3c/testsuite
+# Emit JSON diagnostics suitable for IDEs
+goxsd validate --format=json --exit-on-violation=false schema.xsd document.xml
 
-# Force fresh download (bypasses cache)
-go run ./cmd/w3c_test --force-download
+# Run the official W3C suite with automatic download and analysis
+goxsd test --auto-download --analyze
 
-# Run specific test file
-go run ./cmd/w3c_test --auto-download -file msMeta/test_w3c.xml
-
-# Generate failure analysis report
-go run ./cmd/w3c_test --auto-download -analyze
+# Generate Markdown docs for a schema
+goxsd doc --title "AgentML Schema" --out docs/schema.md agentml/schema/schema.xsd
 ```
 
-**Note:** The test suite (≈50MB) is automatically downloaded from W3C and cached locally. The cache expires after 7 days to avoid hammering W3C servers with repeated downloads.
+Key flags:
+
+* `--base-dir` – override the directory for resolving imports/includes
+* `--strict-content-model` – opt into strict model validation (available on all subcommands)
+* `--allow-remote` – permit HTTP/S schema resolution
+* `--format` – control output format (`text`/`json` for validation, `markdown` for docs)
+
+#### Documentation generation
+
+`goxsd doc` uses the new format-agnostic `xsd.GenerateDoc` API. Programmatic usage example:
+
+```go
+loader, _ := xsd.LoadSchemaWithOptions(context.Background(), xsd.SchemaLoadOptions{
+    SchemaPath: "agentml/schema/schema.xsd",
+})
+doc, _ := xsd.GenerateDoc(loader, xsd.DocFormatMarkdown, xsd.DocOptions{
+    Title:      "AgentML Schema",
+    IncludeTOC: true,
+})
+fmt.Println(doc)
+```
+
+Future formats (HTML, AsciiDoc, JSON) can plug into the same API without changing caller code.
 
 ## Recent Improvements (2025)
 
 ### Validation Engine Enhancements
-- ✅ **SimpleContent Validation**: Full validation of text content in elements with simpleContent
-- ✅ **List/Union Attribute Validation**: Proper validation of attributes with list or union types
-- ✅ **Type-Aware ID/IDREF Detection**: Schema-based ID/IDREF validation instead of name-based heuristics
-- ✅ **Substitution Group Type Checking**: Verifies type compatibility for substitution group members
-- ✅ **Wildcard Namespace Constraints**: Proper error reporting for namespace constraint violations
+
+* ✅ **SimpleContent Validation**: Full validation of text content in elements with simpleContent
+* ✅ **List/Union Attribute Validation**: Proper validation of attributes with list or union types
+* ✅ **Type-Aware ID/IDREF Detection**: Schema-based ID/IDREF validation instead of name-based heuristics
+* ✅ **Substitution Group Type Checking**: Verifies type compatibility for substitution group members
+* ✅ **Wildcard Namespace Constraints**: Proper error reporting for namespace constraint violations
 
 ### Performance & Reliability
-- ✅ **Cycle Detection**: Added infinite recursion protection for circular type definitions
-- ✅ **Memory Optimization**: Reduced allocations in hot paths (ID/IDREF collection)
-- ✅ **GC Efficiency**: Pre-allocated maps and reusable singleton objects
+
+* ✅ **Cycle Detection**: Added infinite recursion protection for circular type definitions
+* ✅ **Memory Optimization**: Reduced allocations in hot paths (ID/IDREF collection)
+* ✅ **GC Efficiency**: Pre-allocated maps and reusable singleton objects
 
 See [fixes.plan.md](fixes.plan.md) for detailed tracking of improvements and remaining enhancements.
 
 ## Requirements
 
-- Go 1.21 or later
-- [go-xmldom](https://github.com/agentflare-ai/go-xmldom) for XML parsing
+* Go 1.21 or later
+* [go-xmldom](https://github.com/agentflare-ai/go-xmldom) for XML parsing
 
 ## License
 
@@ -426,11 +442,11 @@ This is a private repository. For questions or issues, please contact the mainta
 
 ## Related Projects
 
-- [go-xmldom](https://github.com/agentflare-ai/go-xmldom) - XML DOM and XPath library for Go
-- [go-scxml](https://github.com/agentflare-ai/go-scxml) - State Chart XML (SCXML) implementation
+* [go-xmldom](https://github.com/agentflare-ai/go-xmldom) - XML DOM and XPath library for Go
+* [go-scxml](https://github.com/agentflare-ai/go-scxml) - State Chart XML (SCXML) implementation
 
 ## References
 
-- [W3C XML Schema Part 1: Structures](https://www.w3.org/TR/xmlschema-1/)
-- [W3C XML Schema Part 2: Datatypes](https://www.w3.org/TR/xmlschema-2/)
-- [XML Schema Test Suite](https://www.w3.org/XML/2004/xml-schema-test-suite/)
+* [W3C XML Schema Part 1: Structures](https://www.w3.org/TR/xmlschema-1/)
+* [W3C XML Schema Part 2: Datatypes](https://www.w3.org/TR/xmlschema-2/)
+* [XML Schema Test Suite](https://www.w3.org/XML/2004/xml-schema-test-suite/)
